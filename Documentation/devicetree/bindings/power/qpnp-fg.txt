@@ -42,6 +42,10 @@ Parent node optional properties:
 					reading battery thermistor. This should
 					be exactly 6 bytes in length.
 					Example: [01 02 03 04 05 06]
+- qcom,ext-soc-psy-name:		name of a power supply (e.g. an external
+					fuel gauge IC) to report the state of
+					charge and battery voltage from. The
+					FG values are used when it is absent.
 - qcom,resume-soc:			soc to resume charging in percentage.
 - qcom,bcl-lm-threshold-ma:		BCL LPM to MPM mode transition threshold
 					in milliAmpere.

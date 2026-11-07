@@ -305,6 +305,9 @@ struct fg_chip {
 	const char		*batt_type;
 	unsigned long		last_sram_update_time;
 	unsigned long		last_temp_update_time;
+	/* optional external gauge providing the reported SOC and voltage */
+	const char		*ext_soc_psy_name;
+	struct power_supply	*ext_soc_psy;
 };
 
 /* FG_MEMIF DEBUGFS structures */
@@ -1396,6 +1399,29 @@ static enum power_supply_property fg_power_props[] = {
 	POWER_SUPPLY_PROP_ESR_COUNT,
 };
 
+/*
+ * Some boards (e.g. Pantech EF78S) measure the state of charge with a
+ * separate gauge IC. Report its SOC and voltage when one is configured,
+ * falling back to the FG when it is not available.
+ */
+static int fg_get_ext_soc_prop(struct fg_chip *chip,
+			       enum power_supply_property psp, int *val)
+{
+	union power_supply_propval ret = {0, };
+
+	if (!chip->ext_soc_psy_name)
+		return -ENODEV;
+	if (!chip->ext_soc_psy)
+		chip->ext_soc_psy = power_supply_get_by_name(
+						(char *)chip->ext_soc_psy_name);
+	if (!chip->ext_soc_psy || !chip->ext_soc_psy->get_property)
+		return -ENODEV;
+	if (chip->ext_soc_psy->get_property(chip->ext_soc_psy, psp, &ret))
+		return -EINVAL;
+	*val = ret.intval;
+	return 0;
+}
+
 static int fg_power_get_property(struct power_supply *psy,
 				       enum power_supply_property psp,
 				       union power_supply_propval *val)
@@ -1407,13 +1433,15 @@ static int fg_power_get_property(struct power_supply *psy,
 		val->strval = chip->batt_type;
 		break;
 	case POWER_SUPPLY_PROP_CAPACITY:
-		val->intval = get_prop_capacity(chip);
+		if (fg_get_ext_soc_prop(chip, psp, &val->intval))
+			val->intval = get_prop_capacity(chip);
 		break;
 	case POWER_SUPPLY_PROP_CURRENT_NOW:
 		val->intval = get_sram_prop_now(chip, FG_DATA_CURRENT);
 		break;
 	case POWER_SUPPLY_PROP_VOLTAGE_NOW:
-		val->intval = get_sram_prop_now(chip, FG_DATA_VOLTAGE);
+		if (fg_get_ext_soc_prop(chip, psp, &val->intval))
+			val->intval = get_sram_prop_now(chip, FG_DATA_VOLTAGE);
 		break;
 	case POWER_SUPPLY_PROP_VOLTAGE_OCV:
 		val->intval = get_sram_prop_now(chip, FG_DATA_OCV);
@@ -2029,6 +2057,9 @@ static int fg_of_init(struct fg_chip *chip)
 {
 	int rc = 0, sense_type, len = 0;
 	const char *data;
+
+	of_property_read_string(chip->spmi->dev.of_node,
+			"qcom,ext-soc-psy-name", &chip->ext_soc_psy_name);
 
 	OF_READ_SETTING(FG_MEM_SOFT_HOT, "warm-bat-decidegc", rc, 1);
 	OF_READ_SETTING(FG_MEM_SOFT_COLD, "cool-bat-decidegc", rc, 1);
