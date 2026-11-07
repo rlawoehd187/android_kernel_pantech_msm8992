@@ -1225,7 +1225,10 @@ static int mdss_dsi_cmd_dma_tpg_tx(struct mdss_dsi_ctrl_pdata *ctrl,
 		return -EINVAL;
 	}
 
-	ctrl_rev = MIPI_INP(ctrl->ctrl_base);
+	/* the controller may be clock gated here: use the cached revision */
+	if (!ctrl->hw_rev)
+		mdss_dsi_get_hw_revision(ctrl);
+	ctrl_rev = ctrl->hw_rev;
 
 	if (ctrl_rev < MDSS_DSI_HW_REV_103) {
 		pr_err("CMD DMA TPG not supported for this DSI version\n");
@@ -2081,7 +2084,10 @@ int mdss_dsi_cmdlist_commit(struct mdss_dsi_ctrl_pdata *ctrl, int from_mdp)
 	/* make sure dsi_cmd_mdp is idle */
 	mdss_dsi_cmd_mdp_busy(ctrl);
 
-	ctrl_rev = MIPI_INP(ctrl->ctrl_base);
+	/* the controller may be clock gated here: use the cached revision */
+	if (!ctrl->hw_rev)
+		mdss_dsi_get_hw_revision(ctrl);
+	ctrl_rev = ctrl->hw_rev;
 
 	/* For DSI versions less than 1.3.0, CMD DMA TPG is not supported */
 	if (ctrl_rev < MDSS_DSI_HW_REV_103)
