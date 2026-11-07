@@ -233,8 +233,28 @@ static int mdss_dsi_request_gpios(struct mdss_dsi_ctrl_pdata *ctrl_pdata)
 			goto mode_gpio_err;
 		}
 	}
+	if (gpio_is_valid(ctrl_pdata->lcd_vcip_gpio)) {
+		rc = gpio_request(ctrl_pdata->lcd_vcip_gpio, "lcd_vcip_ext_reg");
+		if (rc) {
+			pr_err("request lcd vcip gpio failed, rc=%d\n", rc);
+			goto vcip_gpio_err;
+		}
+	}
+	if (gpio_is_valid(ctrl_pdata->lcd_vcin_gpio)) {
+		rc = gpio_request(ctrl_pdata->lcd_vcin_gpio, "lcd_vcin_ext_reg");
+		if (rc) {
+			pr_err("request lcd vcin gpio failed, rc=%d\n", rc);
+			goto vcin_gpio_err;
+		}
+	}
 	return rc;
 
+vcin_gpio_err:
+	if (gpio_is_valid(ctrl_pdata->lcd_vcip_gpio))
+		gpio_free(ctrl_pdata->lcd_vcip_gpio);
+vcip_gpio_err:
+	if (gpio_is_valid(ctrl_pdata->mode_gpio))
+		gpio_free(ctrl_pdata->mode_gpio);
 mode_gpio_err:
 	if (gpio_is_valid(ctrl_pdata->bklt_en_gpio))
 		gpio_free(ctrl_pdata->bklt_en_gpio);
@@ -282,6 +302,15 @@ int mdss_dsi_panel_reset(struct mdss_panel_data *pdata, int enable)
 			return rc;
 		}
 		if (!pinfo->cont_splash_enabled) {
+			/* Panel bias supplies must be up before reset */
+			if (gpio_is_valid(ctrl_pdata->lcd_vcip_gpio)) {
+				gpio_direction_output(ctrl_pdata->lcd_vcip_gpio, 1);
+				usleep_range(5000, 5100);
+			}
+			if (gpio_is_valid(ctrl_pdata->lcd_vcin_gpio)) {
+				gpio_direction_output(ctrl_pdata->lcd_vcin_gpio, 1);
+				usleep_range(3000, 3100);
+			}
 			if (gpio_is_valid(ctrl_pdata->disp_en_gpio))
 				gpio_set_value((ctrl_pdata->disp_en_gpio), 1);
 
@@ -321,6 +350,17 @@ int mdss_dsi_panel_reset(struct mdss_panel_data *pdata, int enable)
 		gpio_free(ctrl_pdata->rst_gpio);
 		if (gpio_is_valid(ctrl_pdata->mode_gpio))
 			gpio_free(ctrl_pdata->mode_gpio);
+		/* Drop the bias supplies in reverse order, after reset */
+		if (gpio_is_valid(ctrl_pdata->lcd_vcin_gpio)) {
+			usleep_range(5000, 5100);
+			gpio_direction_output(ctrl_pdata->lcd_vcin_gpio, 0);
+			gpio_free(ctrl_pdata->lcd_vcin_gpio);
+		}
+		if (gpio_is_valid(ctrl_pdata->lcd_vcip_gpio)) {
+			usleep_range(3000, 3100);
+			gpio_direction_output(ctrl_pdata->lcd_vcip_gpio, 0);
+			gpio_free(ctrl_pdata->lcd_vcip_gpio);
+		}
 	}
 	return rc;
 }

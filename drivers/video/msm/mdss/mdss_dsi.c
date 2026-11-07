@@ -2018,8 +2018,17 @@ int dsi_panel_device_register(struct device_node *pan_node,
 
 	ctrl_pdata->bklt_en_gpio = of_get_named_gpio(ctrl_pdev->dev.of_node,
 		"qcom,platform-bklight-en-gpio", 0);
+	/* Pantech device trees name the backlight enable gpio differently */
+	if (!gpio_is_valid(ctrl_pdata->bklt_en_gpio))
+		ctrl_pdata->bklt_en_gpio = of_get_named_gpio(
+			ctrl_pdev->dev.of_node, "qcom,platform-bl-en-gpio", 0);
 	if (!gpio_is_valid(ctrl_pdata->bklt_en_gpio))
 		pr_info("%s: bklt_en gpio not specified\n", __func__);
+
+	ctrl_pdata->lcd_vcip_gpio = of_get_named_gpio(ctrl_pdev->dev.of_node,
+		"qcom,platform-vcip-reg-gpio", 0);
+	ctrl_pdata->lcd_vcin_gpio = of_get_named_gpio(ctrl_pdev->dev.of_node,
+		"qcom,platform-vcin-reg-gpio", 0);
 
 	ctrl_pdata->rst_gpio = of_get_named_gpio(ctrl_pdev->dev.of_node,
 			 "qcom,platform-reset-gpio", 0);

@@ -328,6 +328,8 @@ struct mdss_dsi_ctrl_pdata {
 	int disp_en_gpio;
 	int bklt_en_gpio;
 	int mode_gpio;
+	int lcd_vcip_gpio;	/* panel +5.6V (VSP) external regulator enable */
+	int lcd_vcin_gpio;	/* panel -5.4V (VSN) external regulator enable */
 	int bklt_ctrl;	/* backlight ctrl */
 	bool pwm_pmi;
 	int pwm_period;
