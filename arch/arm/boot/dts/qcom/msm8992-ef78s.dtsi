@@ -606,3 +606,8 @@
 	/delete-node/ qcom,mdss_dsi_sharp_wqxga_video_1;
 	/delete-node/ qcom,mdss_dsi_sharp_1080p_cmd;
 };
+
+&pmi8994_fg {
+	/* the state of charge comes from the MAX17058 like on stock */
+	qcom,ext-soc-psy-name = "max17058";
+};
