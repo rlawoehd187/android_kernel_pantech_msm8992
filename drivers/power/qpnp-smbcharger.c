@@ -4345,6 +4345,11 @@ static struct of_device_id smbchg_match_table[] = {
 		.compatible	= "qcom,qpnp-smbcharger",
 		.data		= (void *)ARRAY_SIZE(usb_current_table),
 	},
+	/* Pantech boards describe the same PMI8994 charger under this name */
+	{
+		.compatible	= "qcom,pt-smbcharger",
+		.data		= (void *)ARRAY_SIZE(usb_current_table),
+	},
 	{ },
 };
 
