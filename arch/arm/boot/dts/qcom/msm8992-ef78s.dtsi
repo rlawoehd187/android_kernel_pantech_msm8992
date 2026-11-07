@@ -224,6 +224,13 @@
 		atmel,reset-gpio = <&msm_gpio 0x3c 0x0>;
 		atmel,irq-gpio = <&msm_gpio 0x3d 0x2008>;
 		atmel,iovdd-gpio = <&msm_gpio 0x3f 0x0>;
+		/*
+		 * The stock driver turns the analog supply on by regulator
+		 * name; describe it here instead. Without it CHG stays low.
+		 */
+		avdd-supply = <&pm8994_l22>;
+		/* the panel is mounted with the Y axis reversed */
+		atmel,invert-y;
 		clock-names = "iface_clk", "core_clk";
 		clocks = <&clock_gcc 0x8caa5b4f &clock_gcc 0x1076f220>;
 	};
