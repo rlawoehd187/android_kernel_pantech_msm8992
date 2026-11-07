@@ -1,0 +1,28 @@
+/*
+ * Copyright (c) 2015, The Linux Foundation. All rights reserved.
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 and
+ * only version 2 as published by the Free Software Foundation.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ */
+
+/dts-v1/;
+
+#include "msm8992.dtsi"
+#include "msm8992-pinctrl.dtsi"
+#include "msm8992-mtp.dtsi"
+#include "dsi-panel-nt35531-1080p-cmd-ef78.dtsi"
+#include "dsi-panel-nt35531-1080p-video-ef78.dtsi"
+#include "msm8992-ef78s.dtsi"
+#include "msm8992-camera-sensor-ef78s.dtsi"
+
+/ {
+	model = "Qualcomm Technologies, Inc. MSM8992 - Pantech EF78S";
+	compatible = "qcom,msm8992-mtp", "qcom,msm8992", "qcom,mtp";
+	qcom,board-id = <0x44 0x0>;
+};
