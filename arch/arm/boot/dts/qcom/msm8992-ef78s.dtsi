@@ -198,6 +198,12 @@
 
 &pmi8994_charger {
 	compatible = "qcom,pt-smbcharger";
+	/*
+	 * The battery thermistor always reads -27.5 C on this board (stock
+	 * reports the same), so the hard JEITA limit would block charging
+	 * for good. Stock charges regardless; do the same.
+	 */
+	qcom,jeita-temp-hard-limit = <0>;
 };
 
 &pmi8994_haptics {
