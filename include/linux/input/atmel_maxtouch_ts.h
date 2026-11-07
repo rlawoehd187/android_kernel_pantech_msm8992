@@ -27,6 +27,7 @@ struct mxt_platform_data {
 	int gpio_reset;
 	int gpio_irq;
 	int gpio_i2cmode;
+	int gpio_power;		/* optional gpio-controlled supply, -1 if none */
 	u8 t19_num_keys;
 	const unsigned int *t19_keymap;
 	int t15_num_keys;
@@ -49,6 +50,13 @@ struct mxt_platform_data {
 	u32 disp_maxx;
 	u32 disp_miny;
 	u32 disp_maxy;
+
+	/* no coordinates given: use the range configured in the chip */
+	bool coords_from_chip;
+
+	/* mirror the reported axes */
+	bool invert_x;
+	bool invert_y;
 
 	int *key_codes;
 	u8 bl_addr;

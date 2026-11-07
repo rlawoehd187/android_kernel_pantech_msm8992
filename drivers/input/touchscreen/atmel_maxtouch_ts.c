@@ -943,6 +943,15 @@ static void mxt_input_sync(struct input_dev *input_dev)
 	input_sync(input_dev);
 }
 
+/* mirror the reported coordinates when the panel is mounted flipped */
+static inline void mxt_orient(struct mxt_data *data, int *x, int *y)
+{
+	if (data->pdata->invert_x)
+		*x = data->pdata->disp_maxx - *x;
+	if (data->pdata->invert_y)
+		*y = data->pdata->disp_maxy - *y;
+}
+
 static void mxt_proc_t9_message(struct mxt_data *data, u8 *message)
 {
 	struct device *dev = &data->client->dev;
@@ -1012,6 +1021,7 @@ static void mxt_proc_t9_message(struct mxt_data *data, u8 *message)
 
 		/* Touch active */
 		input_mt_report_slot_state(input_dev, tool, 1);
+		mxt_orient(data, &x, &y);
 		input_report_abs(input_dev, ABS_MT_POSITION_X, x);
 		input_report_abs(input_dev, ABS_MT_POSITION_Y, y);
 		input_report_abs(input_dev, ABS_MT_PRESSURE, amplitude);
@@ -1070,6 +1080,7 @@ static void mxt_proc_t100_message(struct mxt_data *data, u8 *message)
 
 		/* Touch active */
 		input_mt_report_slot_state(input_dev, tool, 1);
+		mxt_orient(data, &x, &y);
 		input_report_abs(input_dev, ABS_MT_POSITION_X, x);
 		input_report_abs(input_dev, ABS_MT_POSITION_Y, y);
 
@@ -1172,7 +1183,7 @@ static void mxt_proc_t63_messages(struct mxt_data *data, u8 *msg)
 	struct device *dev = &data->client->dev;
 	struct input_dev *input_dev = data->input_dev;
 	u8 id;
-	u16 x, y;
+	int x, y;
 	u8 pressure;
 
 	/* do not report events if input device not yet registered */
@@ -1209,6 +1220,7 @@ static void mxt_proc_t63_messages(struct mxt_data *data, u8 *msg)
 
 	if (msg[2] & MXT_T63_STYLUS_DETECT) {
 		input_mt_report_slot_state(input_dev, MT_TOOL_PEN, 1);
+		mxt_orient(data, &x, &y);
 		input_report_abs(input_dev, ABS_MT_POSITION_X, x);
 		input_report_abs(input_dev, ABS_MT_POSITION_Y, y);
 		input_report_abs(input_dev, ABS_MT_PRESSURE, pressure);
@@ -1607,6 +1619,15 @@ static int mxt_update_cfg_version(struct mxt_data *data)
 	return 0;
 }
 
+static void mxt_coords_from_range(struct mxt_platform_data *pdata,
+				  u16 range_x, u16 range_y)
+{
+	pdata->panel_minx = pdata->disp_minx = 0;
+	pdata->panel_miny = pdata->disp_miny = 0;
+	pdata->panel_maxx = pdata->disp_maxx = range_x;
+	pdata->panel_maxy = pdata->disp_maxy = range_y;
+}
+
 static int mxt_update_t100_resolution(struct mxt_data *data)
 {
 	struct i2c_client *client = data->client;
@@ -1668,6 +1689,9 @@ static int mxt_update_t100_resolution(struct mxt_data *data)
 		range_y = range_x;
 		range_x = temp;
 	}
+
+	if (data->pdata->coords_from_chip)
+		mxt_coords_from_range(data->pdata, range_x, range_y);
 
 	if (data->pdata->panel_maxx != range_x) {
 		if (cfg & MXT_T100_CFG_SWITCHXY)
@@ -1768,6 +1792,9 @@ static int mxt_update_t9_resolution(struct mxt_data *data)
 		range.y = range.x;
 		range.x = temp;
 	}
+
+	if (data->pdata->coords_from_chip)
+		mxt_coords_from_range(data->pdata, range.x, range.y);
 
 	if (data->pdata->panel_maxx != range.x) {
 		if (orient & MXT_T9_ORIENT_SWITCH)
@@ -2574,7 +2601,31 @@ static int mxt_gpio_enable(struct mxt_data *data, bool enable)
 			dev_info(&data->client->dev,
 				"i2cmode gpio is not used\n");
 		}
+
+		if (gpio_is_valid(pdata->gpio_power)) {
+			error = gpio_request(pdata->gpio_power,
+				"maxtouch_gpio_power");
+			if (error) {
+				dev_err(&data->client->dev,
+					"unable to request %d gpio (%d)\n",
+					pdata->gpio_power, error);
+				goto err_free_i2cmode;
+			}
+			error = gpio_direction_output(pdata->gpio_power, 0);
+			if (error) {
+				dev_err(&data->client->dev,
+					"unable to set dir for %d gpio (%d)\n",
+					pdata->gpio_power, error);
+				gpio_free(pdata->gpio_power);
+				goto err_free_i2cmode;
+			}
+		}
 	} else {
+		if (gpio_is_valid(pdata->gpio_power)) {
+			gpio_set_value(pdata->gpio_power, 0);
+			gpio_free(pdata->gpio_power);
+		}
+
 		if (gpio_is_valid(pdata->gpio_irq))
 			gpio_free(pdata->gpio_irq);
 
@@ -2609,8 +2660,30 @@ static int mxt_regulator_enable(struct mxt_data *data)
 {
 	int error;
 
-	if (!data->use_regulator)
+	if (!data->use_regulator) {
+		if (!gpio_is_valid(data->pdata->gpio_power))
+			return 0;
+
+		/* Keep RESET low until the supplies are up */
+		gpio_set_value(data->pdata->gpio_reset, 0);
+		gpio_set_value(data->pdata->gpio_power, 1);
+		if (data->reg_avdd) {
+			error = regulator_enable(data->reg_avdd);
+			if (error) {
+				dev_err(&data->client->dev,
+					"avdd enable failed, error=%d\n", error);
+				gpio_set_value(data->pdata->gpio_power, 0);
+				return error;
+			}
+		}
+		msleep(MXT_REGULATOR_DELAY);
+
+		INIT_COMPLETION(data->bl_completion);
+		gpio_set_value(data->pdata->gpio_reset, 1);
+		mxt_wait_for_completion(data, &data->bl_completion,
+					MXT_POWERON_DELAY);
 		return 0;
+	}
 
 	gpio_set_value(data->pdata->gpio_reset, 0);
 
@@ -2652,6 +2725,14 @@ err_dis_vdd:
 
 static void mxt_regulator_disable(struct mxt_data *data)
 {
+	if (!data->use_regulator) {
+		if (data->reg_avdd)
+			regulator_disable(data->reg_avdd);
+		if (gpio_is_valid(data->pdata->gpio_power))
+			gpio_set_value(data->pdata->gpio_power, 0);
+		return;
+	}
+
 	regulator_disable(data->reg_vdd);
 	regulator_disable(data->reg_avdd);
 	if (!IS_ERR(data->reg_xvdd))
@@ -2673,6 +2754,34 @@ static int mxt_regulator_configure(struct mxt_data *data, bool state)
 
 	if (!state)
 		goto deconfig;
+
+	if (gpio_is_valid(data->pdata->gpio_power) &&
+	    !of_find_property(dev->of_node, "vdd-supply", NULL)) {
+		dev_info(dev, "Using gpio-controlled supply\n");
+		/* the analog supply may still be a regulator */
+		if (!of_find_property(dev->of_node, "avdd-supply", NULL))
+			return 0;
+		data->reg_avdd = regulator_get(dev, "avdd");
+		if (IS_ERR(data->reg_avdd)) {
+			error = PTR_ERR(data->reg_avdd);
+			dev_err(dev, "Error %d getting avdd regulator\n", error);
+			data->reg_avdd = NULL;
+			return error;
+		}
+		if (regulator_count_voltages(data->reg_avdd) > 0) {
+			/* run the analog supply at its nominal 3.3V */
+			error = regulator_set_voltage(data->reg_avdd,
+				MXT_AVDD_VTG_MAX_UV, MXT_AVDD_VTG_MAX_UV);
+			if (error) {
+				dev_err(dev, "avdd set_vtg failed err=%d\n",
+					error);
+				regulator_put(data->reg_avdd);
+				data->reg_avdd = NULL;
+				return error;
+			}
+		}
+		return 0;
+	}
 
 	data->reg_vdd = regulator_get(dev, "vdd");
 	if (IS_ERR(data->reg_vdd)) {
@@ -2727,6 +2836,13 @@ static int mxt_regulator_configure(struct mxt_data *data, bool state)
 	return 0;
 
 deconfig:
+	if (!data->use_regulator) {
+		if (data->reg_avdd) {
+			regulator_put(data->reg_avdd);
+			data->reg_avdd = NULL;
+		}
+		return 0;
+	}
 	if (!IS_ERR(data->reg_xvdd))
 		regulator_put(data->reg_xvdd);
 fail_put_avdd:
@@ -3054,13 +3170,19 @@ static int mxt_parse_dt(struct device *dev, struct mxt_platform_data *pdata)
 	struct device_node *np = dev->of_node;
 	struct property *prop;
 
-	error = mxt_get_dt_coords(dev, "atmel,panel-coords", pdata);
-	if (error)
-		return error;
+	if (!of_find_property(np, "atmel,panel-coords", NULL) &&
+	    !of_find_property(np, "atmel,display-coords", NULL)) {
+		/* Leave the chip configuration alone and report its range */
+		pdata->coords_from_chip = true;
+	} else {
+		error = mxt_get_dt_coords(dev, "atmel,panel-coords", pdata);
+		if (error)
+			return error;
 
-	error = mxt_get_dt_coords(dev, "atmel,display-coords", pdata);
-	if (error)
-		return error;
+		error = mxt_get_dt_coords(dev, "atmel,display-coords", pdata);
+		if (error)
+			return error;
+	}
 
 	pdata->cfg_name = MXT_GEN_CFG;
 	error = of_property_read_string(np, "atmel,cfg-name", &pdata->cfg_name);
@@ -3078,8 +3200,11 @@ static int mxt_parse_dt(struct device *dev, struct mxt_platform_data *pdata)
 	pdata->irqflags = temp_val;
 	pdata->gpio_i2cmode = of_get_named_gpio_flags(np, "atmel,i2cmode-gpio",
 				0, &temp_val);
+	pdata->gpio_power = of_get_named_gpio(np, "atmel,iovdd-gpio", 0);
 
 	pdata->ignore_crc = of_property_read_bool(np, "atmel,ignore-crc");
+	pdata->invert_x = of_property_read_bool(np, "atmel,invert-x");
+	pdata->invert_y = of_property_read_bool(np, "atmel,invert-y");
 
 	error = of_property_read_u32(np, "atmel,bl-addr", &temp_val);
 	if (error && (error != -EINVAL))
@@ -4158,6 +4283,7 @@ MODULE_DEVICE_TABLE(i2c, mxt_id);
 #ifdef CONFIG_OF
 static struct of_device_id mxt_match_table[] = {
 	{ .compatible = "atmel,maxtouch-ts",},
+	{ .compatible = "atmel,atmel_mxt_641t",},	/* Pantech EF78S */
 	{ },
 };
 #else
