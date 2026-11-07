@@ -63,6 +63,8 @@ struct mdss_mdp_cmd_ctx {
 	u32 pp_timeout_report_cnt;
 	int pingpong_split_slave;
 	bool pending_mode_switch; /* Used to prevent powering down in stop */
+	/* send the post panel on commands once the first frame is out */
+	bool post_panel_on_pending;
 };
 
 struct mdss_mdp_cmd_ctx mdss_mdp_cmd_ctx_list[MAX_SESSIONS];
@@ -446,6 +448,17 @@ static void pingpong_done_work(struct work_struct *work)
 			mdss_mdp_ctl_notify(ctx->ctl, MDP_NOTIFY_FRAME_DONE);
 
 		mdss_mdp_ctl_perf_release_bw(ctx->ctl);
+
+		/*
+		 * The first frame after power on has reached the panel RAM:
+		 * now it is safe to turn the display on without showing
+		 * whatever the RAM held before.
+		 */
+		if (ctx->post_panel_on_pending) {
+			ctx->post_panel_on_pending = false;
+			mdss_mdp_ctl_intf_event(ctx->ctl,
+				MDSS_EVENT_POST_PANEL_ON, NULL);
+		}
 	}
 }
 
@@ -759,6 +772,8 @@ static int mdss_mdp_cmd_panel_on(struct mdss_mdp_ctl *ctl,
 		ctx->panel_power_state = MDSS_PANEL_POWER_ON;
 		if (sctx)
 			sctx->panel_power_state = MDSS_PANEL_POWER_ON;
+
+		ctx->post_panel_on_pending = true;
 
 		mdss_mdp_ctl_intf_event(ctl,
 			MDSS_EVENT_REGISTER_RECOVERY_HANDLER,
