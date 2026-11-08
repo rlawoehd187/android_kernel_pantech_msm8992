@@ -518,14 +518,17 @@ static void mdss_dsi_start_hs_clk_lane(struct mdss_dsi_ctrl_pdata *ctrl)
 {
 	mutex_lock(&ctrl->clk_lane_mutex);
 	mdss_dsi_clk_ctrl(ctrl, DSI_ALL_CLKS, 1);
-	if (ctrl->clk_lane_cnt) {
-		pr_err("%s: ndx=%d do-wait, cnt=%d\n",
-				__func__, ctrl->ndx, ctrl->clk_lane_cnt);
+	/*
+	 * A dcs command can be sent while an mdp stream is still in
+	 * flight, so the users nest: only the first one forces the
+	 * clk lane to hs and only the last one releases it.
+	 */
+	if (!ctrl->clk_lane_cnt) {
+		/* make sure the clk lane is stopped before forcing hs */
 		mdss_dsi_wait_clk_lane_to_stop(ctrl);
+		/* force clk lane hs for next dma or mdp stream */
+		mdss_dsi_cfg_lane_ctrl(ctrl, BIT(28), 1);
 	}
-
-	/* force clk lane hs for next dma or mdp stream */
-	mdss_dsi_cfg_lane_ctrl(ctrl, BIT(28), 1);
 	ctrl->clk_lane_cnt++;
 	pr_debug("%s: ndx=%d, set_hs, cnt=%d\n", __func__,
 				ctrl->ndx, ctrl->clk_lane_cnt);
@@ -547,11 +550,13 @@ static void mdss_dsi_stop_hs_clk_lane(struct mdss_dsi_ctrl_pdata *ctrl,
 
 	mutex_lock(&ctrl->clk_lane_mutex);
 	mdss_dsi_clk_ctrl(ctrl, DSI_ALL_CLKS, 1);
-	if (ctrl->clk_lane_cnt != 1) {
-		pr_err("%s: ndx=%d wait had been done, cnt=%d\n",
-				__func__, ctrl->ndx, ctrl->clk_lane_cnt);
+	if (!ctrl->clk_lane_cnt) {
+		pr_debug("%s: ndx=%d wait had been done\n",
+				__func__, ctrl->ndx);
 		goto release;
 	}
+	if (--ctrl->clk_lane_cnt)
+		goto release;	/* still in use */
 
 	/* fifo */
 	if (readl_poll_timeout(((ctrl->ctrl_base) + 0x000c),
@@ -577,8 +582,6 @@ end:
 	mdss_dsi_cfg_lane_ctrl(ctrl, BIT(28), 0);
 
 	mdss_dsi_wait_clk_lane_to_stop(ctrl);
-
-	ctrl->clk_lane_cnt = 0;
 
 release:
 	if (term == DSI_MDP_TERM) {

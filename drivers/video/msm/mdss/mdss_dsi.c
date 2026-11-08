@@ -576,6 +576,14 @@ static int mdss_dsi_off(struct mdss_panel_data *pdata, int power_state)
 		mdss_dsi_phy_disable(ctrl_pdata);
 	}
 
+	/* the lane control is reset with the controller */
+	mutex_lock(&ctrl_pdata->clk_lane_mutex);
+	if (ctrl_pdata->clk_lane_cnt)
+		pr_warn("%s: ndx=%d clk lane still forced hs, cnt=%d\n",
+			__func__, ctrl_pdata->ndx, ctrl_pdata->clk_lane_cnt);
+	ctrl_pdata->clk_lane_cnt = 0;
+	mutex_unlock(&ctrl_pdata->clk_lane_mutex);
+
 	mdss_dsi_clk_ctrl(ctrl_pdata, DSI_ALL_CLKS, 0);
 
 panel_power_ctrl:
