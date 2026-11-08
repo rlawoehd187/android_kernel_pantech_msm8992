@@ -1,0 +1,25 @@
+NXP PN547 NFC controller
+
+Required properties:
+- compatible: "nxp,pn547"
+- reg: I2C slave address of the controller
+- interrupt-parent, interrupts: interrupt of the IRQ line
+- nxp,irq-gpio: GPIO of the IRQ line, high when data can be read
+- nxp,ven-gpio: GPIO of the VEN (enable) line
+- nxp,firm-gpio: GPIO selecting the firmware download mode
+- clocks: reference clock of the controller
+- clock-names: must be "ref_clk"
+
+Example:
+
+	pn547@28 {
+		compatible = "nxp,pn547";
+		reg = <0x28>;
+		nxp,irq-gpio = <&msm_gpio 29 0x0>;
+		nxp,ven-gpio = <&msm_gpio 54 0x0>;
+		nxp,firm-gpio = <&msm_gpio 31 0x0>;
+		interrupt-parent = <&msm_gpio>;
+		interrupts = <29 0x0>;
+		clocks = <&clock_rpm clk_bb_clk2_pin>;
+		clock-names = "ref_clk";
+	};

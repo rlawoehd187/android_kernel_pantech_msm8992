@@ -620,6 +620,13 @@ config QCOM_LIQUID_DOCK
 	  the docking station of various models of Qualcomm Technology's
 	  LiQUID Mobile Development Platforms.
 
+config PN547
+	bool "NXP PN547 NFC Controller Driver"
+	depends on I2C
+	help
+	  NXP PN547 Near Field Communication controller support. The
+	  controller is exposed to the NFC HAL as /dev/pn547.
+
 source "drivers/misc/c2port/Kconfig"
 source "drivers/misc/eeprom/Kconfig"
 source "drivers/misc/cb710/Kconfig"
