@@ -20,6 +20,41 @@
 
 static struct v4l2_file_operations msm_led_flash_v4l2_subdev_fops;
 
+/*
+ * Serve the camera stacks that use the msm_flash interface. The first field
+ * is the same in the native and in the compat structure.
+ */
+static long msm_led_flash_cfg(struct msm_led_flash_ctrl_t *fctrl, void *arg)
+{
+	struct msm_camera_led_cfg_t led_cfg;
+	enum msm_flash_cfg_type_t cfg_type =
+		((struct msm_flash_cfg_data_t *)arg)->cfg_type;
+
+	memset(&led_cfg, 0, sizeof(led_cfg));
+
+	switch (cfg_type) {
+	case CFG_FLASH_INIT:
+		led_cfg.cfgtype = MSM_CAMERA_LED_INIT;
+		break;
+	case CFG_FLASH_RELEASE:
+		led_cfg.cfgtype = MSM_CAMERA_LED_RELEASE;
+		break;
+	case CFG_FLASH_OFF:
+		led_cfg.cfgtype = MSM_CAMERA_LED_OFF;
+		break;
+	case CFG_FLASH_LOW:
+		led_cfg.cfgtype = MSM_CAMERA_LED_LOW;
+		break;
+	case CFG_FLASH_HIGH:
+		led_cfg.cfgtype = MSM_CAMERA_LED_HIGH;
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	return fctrl->func_tbl->flash_led_config(fctrl, &led_cfg);
+}
+
 static long msm_led_flash_subdev_ioctl(struct v4l2_subdev *sd,
 	unsigned int cmd, void *arg)
 {
@@ -39,6 +74,11 @@ static long msm_led_flash_subdev_ioctl(struct v4l2_subdev *sd,
 		return fctrl->func_tbl->flash_get_subdev_id(fctrl, argp);
 	case VIDIOC_MSM_FLASH_LED_DATA_CFG:
 		return fctrl->func_tbl->flash_led_config(fctrl, argp);
+	case VIDIOC_MSM_FLASH_CFG:
+#ifdef CONFIG_COMPAT
+	case VIDIOC_MSM_FLASH_CFG32:
+#endif
+		return msm_led_flash_cfg(fctrl, arg);
 	case MSM_SD_SHUTDOWN:
 		*(int *)argp = MSM_CAMERA_LED_RELEASE;
 		return fctrl->func_tbl->flash_led_config(fctrl, argp);
