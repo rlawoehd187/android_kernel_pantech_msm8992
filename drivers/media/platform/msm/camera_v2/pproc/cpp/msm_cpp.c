@@ -2665,6 +2665,26 @@ static long msm_cpp_subdev_fops_compat_ioctl(struct file *file,
 		cmd = VIDIOC_MSM_CPP_GET_HW_INFO;
 		break;
 	}
+	case VIDIOC_MSM_CPP_GET_INST_INFO32:
+	{
+		struct msm_cpp_frame_info32_t inst_info;
+		struct v4l2_fh *vfh = file->private_data;
+		uint32_t i;
+
+		memset(&inst_info, 0, sizeof(inst_info));
+		for (i = 0; i < MAX_ACTIVE_CPP_INSTANCE; i++) {
+			if (cpp_dev->cpp_subscribe_list[i].vfh == vfh) {
+				inst_info.inst_id = i;
+				break;
+			}
+		}
+		if (copy_to_user((void __user *)kp_ioctl.ioctl_ptr,
+			&inst_info, sizeof(inst_info)))
+			return -EINVAL;
+
+		cmd = VIDIOC_MSM_CPP_GET_INST_INFO;
+		break;
+	}
 	case VIDIOC_MSM_CPP_LOAD_FIRMWARE32:
 		cmd = VIDIOC_MSM_CPP_LOAD_FIRMWARE;
 		break;
@@ -2813,6 +2833,7 @@ static long msm_cpp_subdev_fops_compat_ioctl(struct file *file,
 	case VIDIOC_MSM_CPP_GET_HW_INFO:
 	case VIDIOC_MSM_CPP_CFG:
 	case VIDIOC_MSM_CPP_GET_EVENTPAYLOAD:
+	case VIDIOC_MSM_CPP_GET_INST_INFO:
 		break;
 	default:
 		pr_err_ratelimited("%s: unsupported compat type :%d\n",
