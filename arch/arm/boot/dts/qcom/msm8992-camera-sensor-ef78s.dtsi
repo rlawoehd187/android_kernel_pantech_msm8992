@@ -51,12 +51,14 @@
 		reg = <0x48 0x0>;
 		compatible = "qcom,actuator";
 		qcom,cci-master = <0x0>;
+		qcom,rumba-sa;
 	};
 
 	eeprom: qcom,eeprom@48 {
 		cell-index = <0x0>;
 		reg = <0x48>;
 		qcom,eeprom-name = "rumba_sa";
+		qcom,rumba-cmd-read;
 		compatible = "qcom,eeprom";
 		qcom,slave-addr = <0x48>;
 		qcom,cci-master = <0x0>;
