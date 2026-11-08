@@ -39,6 +39,7 @@
 #include <linux/mm_types.h>
 #include <linux/dma-contiguous.h>
 #include <linux/dma-removed.h>
+#include <linux/delay.h>
 #include <trace/events/kmem.h>
 
 struct cma {
@@ -588,13 +589,14 @@ static void clear_cma_bitmap(struct cma *cma, unsigned long pfn, int count)
  * global one. Requires architecture specific get_dev_cma_area() helper
  * function.
  */
-unsigned long dma_alloc_from_contiguous(struct device *dev, int count,
+unsigned long dma_alloc_from_contiguous(struct device *dev, size_t count,
 				       unsigned int align)
 {
 	unsigned long mask, pfn = 0, pageno, start = 0;
 	struct cma *cma = dev_get_cma_area(dev);
 	int ret = 0;
 	int tries = 0;
+	int retry_after_sleep = 0;
 
 	if (!cma || !cma->count)
 		return 0;
@@ -602,10 +604,13 @@ unsigned long dma_alloc_from_contiguous(struct device *dev, int count,
 	if (align > CONFIG_CMA_ALIGNMENT)
 		align = CONFIG_CMA_ALIGNMENT;
 
-	pr_debug("%s(cma %p, count %d, align %d)\n", __func__, (void *)cma,
+	pr_debug("%s(cma %pK, count %zu, align %d)\n", __func__, (void *)cma,
 		 count, align);
 
 	if (!count)
+		return 0;
+
+	if (count > cma->count)
 		return 0;
 
 	mask = (1 << align) - 1;
@@ -616,9 +621,25 @@ unsigned long dma_alloc_from_contiguous(struct device *dev, int count,
 		pageno = bitmap_find_next_zero_area(cma->bitmap, cma->count,
 						    start, count, mask);
 		if (pageno >= cma->count) {
-			pfn = 0;
-			mutex_unlock(&cma->lock);
-			break;
+			if (retry_after_sleep == 0) {
+				pfn = 0;
+				start = 0;
+				pr_debug("%s: Memory range busy,"
+					"retry after sleep\n", __func__);
+				/*
+				* Page momentarily pinned by some other process
+				* and so cannot be migrated. Wait for 100ms and
+				* then retry to see if it has been freed.
+				*/
+				msleep(100);
+				retry_after_sleep = 1;
+				mutex_unlock(&cma->lock);
+				continue;
+			} else {
+				pfn = 0;
+				mutex_unlock(&cma->lock);
+				break;
+			}
 		}
 		bitmap_set(cma->bitmap, pageno, count);
 		/*

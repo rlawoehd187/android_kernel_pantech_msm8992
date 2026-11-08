@@ -465,6 +465,11 @@ static int context_build_overlap(struct smq_invoke_ctx *ctx)
 	for (i = 0; i < nbufs; ++i) {
 		ctx->overs[i].start = (uintptr_t)pra[i].buf.pv;
 		ctx->overs[i].end = ctx->overs[i].start + pra[i].buf.len;
+		if (pra[i].buf.len) {
+			VERIFY(err, ctx->overs[i].end > ctx->overs[i].start);
+			if (err)
+				goto bail;
+		}
 		ctx->overs[i].raix = i;
 		ctx->overps[i] = &ctx->overs[i];
 	}
@@ -521,6 +526,7 @@ static int context_alloc(struct fastrpc_apps *me, uint32_t kernel,
 		goto bail;
 
 	INIT_HLIST_NODE(&ctx->hn);
+	hlist_add_fake(&ctx->hn);
 	ctx->apps = me;
 	ctx->fdata = fdata;
 	ctx->pra = (remote_arg_t *)(&ctx[1]);
@@ -719,7 +725,8 @@ static int get_page_list(uint32_t kernel, struct smq_invoke_ctx *ctx)
 	pgstart->size = obuf->size;
 	for (i = 0; i < inbufs + outbufs; ++i) {
 		void *buf;
-		int len, num;
+		int num;
+		ssize_t len;
 
 		list[i].num = 0;
 		list[i].pgidx = 0;
@@ -774,6 +781,53 @@ static int get_page_list(uint32_t kernel, struct smq_invoke_ctx *ctx)
 	return err;
 }
 
+static inline int is_overlapped_outbuf(struct smq_invoke_ctx *ctx, int oix)
+{
+	int inbufs, outbufs;
+
+	inbufs = REMOTE_SCALARS_INBUFS(ctx->sc);
+	outbufs = REMOTE_SCALARS_OUTBUFS(ctx->sc);
+	if (!ctx->overps[oix]->mstart)
+		return 1;
+	oix = oix + 1;
+	if ((oix < inbufs + outbufs) && !ctx->overps[oix]->mstart &&
+			ctx->overps[oix]->raix < inbufs)
+		return 1;
+	return 0;
+}
+
+static int clear_user_outbufs(struct smq_invoke_ctx *ctx)
+{
+	remote_arg_t *pra = ctx->pra;
+	remote_arg_t *rpra = ctx->rpra;
+	uintptr_t ptr, end;
+	int oix, err = 0;
+	int inbufs = REMOTE_SCALARS_INBUFS(ctx->sc);
+	int outbufs = REMOTE_SCALARS_OUTBUFS(ctx->sc);
+
+	for (oix = 0; oix < inbufs + outbufs; ++oix) {
+		int i = ctx->overps[oix]->raix;
+		if ((i < inbufs) || (pra[i].buf.pv != rpra[i].buf.pv) ||
+			is_overlapped_outbuf(ctx, oix))
+			continue;
+		VERIFY(err, 0 == clear_user(rpra[i].buf.pv,
+				(rpra[i].buf.len < 8) ? rpra[i].buf.len : 8));
+		if (err)
+			goto bail;
+		ptr = buf_page_start(rpra[i].buf.pv) + PAGE_SIZE;
+		end = (uintptr_t)rpra[i].buf.pv + rpra[i].buf.len;
+		for (; ptr < end; ptr += PAGE_SIZE) {
+			VERIFY(err, 0 == clear_user((void *)ptr,
+					((end - ptr) < 8) ? end - ptr : 8));
+			if (err)
+				goto bail;
+		}
+	}
+
+ bail:
+	return err;
+}
+
 static int get_args(uint32_t kernel, struct smq_invoke_ctx *ctx,
 			remote_arg_t *upra)
 {
@@ -786,9 +840,9 @@ static int get_args(uint32_t kernel, struct smq_invoke_ctx *ctx,
 	void *args;
 	remote_arg_t *pra = ctx->pra;
 	remote_arg_t *rpra = ctx->rpra;
-	ssize_t rlen, used, size;
+	ssize_t rlen, used, size, copylen = 0;
 	uint32_t sc = ctx->sc, start;
-	int i, inh, bufs = 0, err = 0, oix, copylen = 0;
+	int i, inh, bufs = 0, err = 0, oix;
 	int inbufs = REMOTE_SCALARS_INBUFS(sc);
 	int outbufs = REMOTE_SCALARS_OUTBUFS(sc);
 	int cid = ctx->fdata->cid;
@@ -837,13 +891,23 @@ static int get_args(uint32_t kernel, struct smq_invoke_ctx *ctx,
 	/* calculate len requreed for copying */
 	for (oix = 0; oix < inbufs + outbufs; ++oix) {
 		int i = ctx->overps[oix]->raix;
+		uintptr_t mstart, mend;
+
 		if (!pra[i].buf.len)
 			continue;
 		if (list[i].num)
 			continue;
 		if (ctx->overps[oix]->offset == 0)
 			copylen = ALIGN(copylen, BALIGN);
-		copylen += ctx->overps[oix]->mend - ctx->overps[oix]->mstart;
+		mstart = ctx->overps[oix]->mstart;
+		mend = ctx->overps[oix]->mend;
+		VERIFY(err, (mend - mstart) <= LONG_MAX);
+		if (err)
+			goto bail;
+		copylen += mend - mstart;
+		VERIFY(err, copylen >= 0);
+		if (err)
+			goto bail;
 	}
 
 	/* alocate new buffer */
@@ -869,7 +933,7 @@ static int get_args(uint32_t kernel, struct smq_invoke_ctx *ctx,
 	/* copy non ion buffers */
 	for (oix = 0; oix < inbufs + outbufs; ++oix) {
 		int i = ctx->overps[oix]->raix;
-		int mlen = ctx->overps[oix]->mend - ctx->overps[oix]->mstart;
+		ssize_t mlen = ctx->overps[oix]->mend - ctx->overps[oix]->mstart;
 		if (!pra[i].buf.len)
 			continue;
 		if (list[i].num)
@@ -906,8 +970,14 @@ static int get_args(uint32_t kernel, struct smq_invoke_ctx *ctx,
 		rlen -= mlen;
 	}
 
-	for (i = 0; i < inbufs; ++i) {
-		if (rpra[i].buf.len)
+	if (!kernel) {
+		VERIFY(err, 0 == clear_user_outbufs(ctx));
+		if (err)
+			goto bail;
+	}
+	for (oix = 0; oix < inbufs + outbufs; ++oix) {
+		int i = ctx->overps[oix]->raix;
+		if (rpra[i].buf.len && ctx->overps[oix]->mstart)
 			dmac_flush_range(rpra[i].buf.pv,
 				  (char *)rpra[i].buf.pv + rpra[i].buf.len);
 	}
@@ -990,28 +1060,6 @@ static void inv_args_pre(uint32_t sc, remote_arg_t *rpra)
 	}
 }
 
-static void inv_args_idx(struct smq_invoke_ctx *ctx, int id)
-{
-	struct fastrpc_apps *me = &gfa;
-	struct smq_invoke_buf *list;
-	struct smq_phy_page *pages;
-	struct page *page;
-	struct scatterlist sg;
-
-	if (me->channel[ctx->fdata->cid].smmu.enabled) {
-		dmac_inv_range(ctx->rpra[id].buf.pv,
-			(char *)ctx->rpra[id].buf.pv + ctx->rpra[id].buf.len);
-		return;
-	}
-	list = smq_invoke_buf_start(ctx->rpra, ctx->sc);
-	pages = smq_phy_page_start(ctx->sc, list);
-	page = phys_to_page(pages[list[id].pgidx].addr);
-	sg_init_table(&sg, 1);
-	sg_set_page(&sg, page, pages[list[id].pgidx].size, 0);
-	sg_dma_address(&sg) = pages[list[id].pgidx].addr;
-	dma_sync_sg_for_cpu(NULL, &sg, 1, DMA_FROM_DEVICE);
-}
-
 static void inv_args(struct smq_invoke_ctx *ctx)
 {
 	uint32_t sc = ctx->sc;
@@ -1026,7 +1074,8 @@ static void inv_args(struct smq_invoke_ctx *ctx)
 		if (buf_page_start(rpra) == buf_page_start(rpra[i].buf.pv))
 			inv = 1;
 		else if (rpra[i].buf.len)
-			inv_args_idx(ctx, i);
+			dmac_inv_range(rpra[i].buf.pv,
+				(char *)rpra[i].buf.pv + rpra[i].buf.len);
 	}
 
 	if (inv || REMOTE_SCALARS_OUTHANDLES(sc))

@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2015, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2016, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -29,7 +29,6 @@
 #define IPA_GENERIC_AGGR_BYTE_LIMIT 6
 #define IPA_GENERIC_AGGR_TIME_LIMIT 1
 #define IPA_GENERIC_AGGR_PKT_LIMIT 0
-#define IPA_GENERIC_RX_POOL_SZ 32
 
 #define IPA_GENERIC_RX_BUFF_BASE_SZ 8192
 #define IPA_REAL_GENERIC_RX_BUFF_SZ (SKB_DATA_ALIGN(\
@@ -47,6 +46,8 @@
 #define IPA_ODU_RX_BUFF_SZ 2048
 #define IPA_ODU_RX_POOL_SZ 32
 #define IPA_SIZE_DL_CSUM_META_TRAILER 8
+
+#define IPA_HEADROOM 128
 
 static struct sk_buff *ipa_get_skb_ipa_rx(unsigned int len, gfp_t flags);
 static void ipa_replenish_wlan_rx_cache(struct ipa_sys_context *sys);
@@ -738,16 +739,23 @@ static void ipa_rx_switch_to_intr_mode(struct ipa_sys_context *sys)
 {
 	int ret;
 
-	if (!atomic_read(&sys->curr_polling_state)) {
-		IPAERR("already in intr mode\n");
-		goto fail;
-	}
-
 	ret = sps_get_config(sys->ep->ep_hdl, &sys->ep->connect);
 	if (ret) {
 		IPAERR("sps_get_config() failed %d\n", ret);
 		goto fail;
 	}
+
+	if (!atomic_read(&sys->curr_polling_state) &&
+		((sys->ep->connect.options & SPS_O_EOT) == SPS_O_EOT)) {
+		IPADBG("already in intr mode\n");
+		return;
+	}
+
+	if (!atomic_read(&sys->curr_polling_state)) {
+		IPAERR("Not in poll mode, and IRQ not enabled.\n");
+		goto fail;
+	}
+
 	sys->event.options = SPS_O_EOT;
 	ret = sps_register_event(sys->ep->ep_hdl, &sys->event);
 	if (ret) {
@@ -813,6 +821,38 @@ static void ipa_sps_irq_rx_notify(struct sps_event_notify *notify)
 		break;
 	default:
 		IPAERR("recieved unexpected event id %d\n", notify->event_id);
+	}
+}
+
+void ipa_sps_irq_rx_notify_all(void)
+{
+	struct sps_event_notify notify;
+	struct ipa_ep_context *ep;
+	int ipa_ep_idx, client_num;
+
+	IPADBG("\n");
+
+	for (client_num = IPA_CLIENT_CONS;
+		client_num < IPA_CLIENT_MAX; client_num++) {
+		if ((client_num != IPA_CLIENT_APPS_LAN_CONS) &&
+			(client_num != IPA_CLIENT_APPS_WAN_CONS))
+			continue;
+
+		memset(&notify, 0, sizeof(notify));
+		ipa_ep_idx = ipa_get_ep_mapping(client_num);
+		if (ipa_ep_idx == -1) {
+			IPAERR("Invalid client.\n");
+			continue;
+		}
+		ep = &ipa_ctx->ep[ipa_ep_idx];
+		if (!ep->valid) {
+			IPAERR("EP (%d) not allocated.\n", ipa_ep_idx);
+			continue;
+		}
+		notify.user = ep->sys;
+		notify.event_id = SPS_EVENT_EOT;
+		if (ep->sys->sps_callback)
+			ep->sys->sps_callback(&notify);
 	}
 }
 
@@ -1782,6 +1822,9 @@ static int ipa_lan_rx_pyld_hdlr(struct sk_buff *skb,
 	unsigned char *buf;
 	bool drop_packet;
 	int src_pipe;
+	unsigned int used = *(unsigned int *)skb->cb;
+	unsigned int used_align = ALIGN(used, 32);
+	unsigned long unused = IPA_GENERIC_RX_BUFF_BASE_SZ - used;
 
 	IPA_DUMP_BUFF(skb->data, 0, skb->len);
 
@@ -1814,6 +1857,8 @@ static int ipa_lan_rx_pyld_hdlr(struct sk_buff *skb,
 						skb->data, sys->len_rem);
 					skb_trim(skb2,
 						skb2->len - sys->len_pad);
+					skb2->truesize = skb2->len +
+						sizeof(struct sk_buff);
 					sys->ep->client_notify(sys->ep->priv,
 						IPA_RECEIVE,
 						(unsigned long)(skb2));
@@ -1963,6 +2008,11 @@ begin:
 					if (drop_packet)
 						dev_kfree_skb_any(skb2);
 					else {
+					skb2->truesize = skb2->len +
+						sizeof(struct sk_buff) +
+						(ALIGN(len +
+						IPA_PKT_STATUS_SIZE, 32) *
+						unused / used_align);
 						sys->ep->client_notify(
 							sys->ep->priv,
 							IPA_RECEIVE,
@@ -2035,6 +2085,8 @@ static void wan_rx_handle_splt_pyld(struct sk_buff *skb,
 				IPADBG(
 					"removing Status element from skb and sending to WAN client");
 				skb_pull(skb2, IPA_PKT_STATUS_SIZE);
+				skb2->truesize = skb2->len +
+					sizeof(struct sk_buff);
 				sys->ep->client_notify(sys->ep->priv,
 					IPA_RECEIVE,
 					(unsigned long)(skb2));
@@ -2065,6 +2117,9 @@ static int ipa_wan_rx_pyld_hdlr(struct sk_buff *skb,
 	int checksum_trailer_exists;
 	int frame_len;
 	int ep_idx;
+	unsigned int used = *(unsigned int *)skb->cb;
+	unsigned int used_align = ALIGN(used, 32);
+	unsigned long unused = IPA_GENERIC_RX_BUFF_BASE_SZ - used;
 
 	IPA_DUMP_BUFF(skb->data, 0, skb->len);
 	if (skb->len == 0) {
@@ -2166,6 +2221,10 @@ static int ipa_wan_rx_pyld_hdlr(struct sk_buff *skb,
 				IPADBG(
 					"removing Status element from skb and sending to WAN client");
 				skb_pull(skb2, IPA_PKT_STATUS_SIZE);
+				skb2->truesize = skb2->len +
+					sizeof(struct sk_buff) +
+					(ALIGN(frame_len, 32) *
+					 unused / used_align);
 				sys->ep->client_notify(sys->ep->priv,
 					IPA_RECEIVE, (unsigned long)(skb2));
 				skb_pull(skb, frame_len);
@@ -2246,6 +2305,18 @@ static struct sk_buff *ipa_get_skb_ipa_rx(unsigned int len, gfp_t flags)
 	return __dev_alloc_skb(len, flags);
 }
 
+static struct sk_buff *ipa_get_skb_ipa_rx_headroom(unsigned int len,
+		gfp_t flags)
+{
+	struct sk_buff *skb;
+
+	skb = __dev_alloc_skb(len + IPA_HEADROOM, flags);
+	if (skb)
+		skb_reserve(skb, IPA_HEADROOM);
+
+	return skb;
+}
+
 static void ipa_free_skb_rx(struct sk_buff *skb)
 {
 	dev_kfree_skb_any(skb);
@@ -2301,6 +2372,7 @@ static void ipa_wq_rx_common(struct ipa_sys_context *sys, u32 size)
 			sys->rx_buff_sz, DMA_FROM_DEVICE);
 	skb_set_tail_pointer(rx_skb, rx_pkt_expected->len);
 	rx_skb->len = rx_pkt_expected->len;
+	*(unsigned int *)rx_skb->cb = rx_skb->len;
 	rx_skb->truesize = rx_pkt_expected->len + sizeof(struct sk_buff);
 	sys->pyld_hdlr(rx_skb, sys);
 	sys->repl_hdlr(sys);
@@ -2493,9 +2565,9 @@ static int ipa_assign_policy(struct ipa_sys_connect_params *in,
 						replenish_rx_work_func);
 				INIT_WORK(&sys->repl_work, ipa_wq_repl_rx);
 				atomic_set(&sys->curr_polling_state, 0);
-				sys->rx_buff_sz = IPA_GENERIC_RX_BUFF_SZ;
-				sys->rx_pool_sz = IPA_GENERIC_RX_POOL_SZ;
-				sys->get_skb = ipa_get_skb_ipa_rx;
+				sys->rx_buff_sz = IPA_GENERIC_RX_BUFF_SZ -
+					IPA_HEADROOM;
+				sys->get_skb = ipa_get_skb_ipa_rx_headroom;
 				sys->free_skb = ipa_free_skb_rx;
 				in->ipa_ep_cfg.aggr.aggr_en = IPA_ENABLE_AGGR;
 				in->ipa_ep_cfg.aggr.aggr = IPA_GENERIC;
@@ -2507,9 +2579,13 @@ static int ipa_assign_policy(struct ipa_sys_connect_params *in,
 					IPA_GENERIC_AGGR_PKT_LIMIT;
 				if (in->client == IPA_CLIENT_APPS_LAN_CONS) {
 					sys->pyld_hdlr = ipa_lan_rx_pyld_hdlr;
+					sys->rx_pool_sz =
+						IPA_GENERIC_RX_POOL_SZ;
 				} else if (in->client ==
 						IPA_CLIENT_APPS_WAN_CONS) {
 					sys->pyld_hdlr = ipa_wan_rx_pyld_hdlr;
+					sys->rx_pool_sz =
+						ipa_ctx->wan_rx_ring_size;
 				}
 				if (nr_cpu_ids > 1)
 					sys->repl_hdlr =

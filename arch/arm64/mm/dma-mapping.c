@@ -88,6 +88,7 @@ static void *__alloc_from_pool(size_t size, struct page **ret_page)
 	if (pageno < pool->nr_pages) {
 		bitmap_set(pool->bitmap, pageno, count);
 		ptr = pool->vaddr + PAGE_SIZE * pageno;
+		memset(ptr, 0, size);
 		*ret_page = pool->pages[pageno];
 	} else {
 		pr_err_once("ERROR: %u KiB atomic DMA coherent pool is too small!\n"
@@ -208,6 +209,7 @@ static void *arm64_swiotlb_alloc_coherent(struct device *dev, size_t size,
 
 		page = pfn_to_page(pfn);
 		addr = page_address(page);
+		memset(addr, 0, size);
 
 		if (dma_get_attr(DMA_ATTR_NO_KERNEL_MAPPING, attrs) ||
 		    dma_get_attr(DMA_ATTR_STRONGLY_ORDERED, attrs)) {
@@ -294,16 +296,20 @@ static void *arm64_swiotlb_alloc_noncoherent(struct device *dev, size_t size,
 			/* remove any dirty cache lines on the kernel alias */
 			__dma_flush_range(ptr, ptr + size);
 
-		map = kmalloc(sizeof(struct page *) << order, flags & ~GFP_DMA);
-		if (!map)
-			goto no_map;
+		map = kmalloc(sizeof(struct page *) << order,
+			      (flags & ~GFP_DMA) | __GFP_NOWARN);
+		if (!map) {
+			map = vmalloc(sizeof(struct page *) << order);
+			if (!map)
+				goto no_map;
+		}
 
 		/* create a coherent mapping */
 		page = virt_to_page(ptr);
 		for (i = 0; i < (size >> PAGE_SHIFT); i++)
 			map[i] = page + i;
 		coherent_ptr = vmap(map, size >> PAGE_SHIFT, VM_MAP, prot);
-		kfree(map);
+		kvfree(map);
 		if (!coherent_ptr)
 			goto no_map;
 	}

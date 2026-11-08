@@ -63,6 +63,7 @@
 #define MSM_CPP_CMD_ERROR_REQUEST		0x9
 #define MSM_CPP_CMD_GET_STATUS			0xA
 #define MSM_CPP_CMD_GET_FW_VER			0xB
+#define MSM_CPP_CMD_GROUP_BUFFER		0x12
 
 #define MSM_CPP_MSG_ID_CMD          0x3E646D63
 #define MSM_CPP_MSG_ID_OK           0x0A0A4B4F
@@ -85,10 +86,11 @@
 #define MSM_CPP_START_ADDRESS		0x0
 #define MSM_CPP_END_ADDRESS			0x3F00
 
-#define MSM_CPP_POLL_RETRIES		20
+#define MSM_CPP_POLL_RETRIES		200
 #define MSM_CPP_TASKLETQ_SIZE		16
 #define MSM_CPP_TX_FIFO_LEVEL		16
 #define MSM_CPP_RX_FIFO_LEVEL		512
+#define MSM_CPP_GROUP_CMD_LEN		69
 
 struct cpp_subscribe_info {
 	struct v4l2_fh *vfh;
@@ -198,6 +200,7 @@ struct cpp_device {
 	uint32_t fw_version;
 	uint8_t stream_cnt;
 	uint8_t timeout_trial_cnt;
+	uint8_t max_timeout_trial_cnt;
 
 	int domain_num;
 	struct iommu_domain *domain;
@@ -238,8 +241,15 @@ struct cpp_device {
 	uint32_t wr_3_pntr;
 	uint32_t rd_ref_pntr;
 	uint32_t wr_ref_pntr;
+	uint32_t wr_0_meta_data_wr_pntr;
+	uint32_t wr_1_meta_data_wr_pntr;
+	uint32_t wr_2_meta_data_wr_pntr;
+	uint32_t wr_3_meta_data_wr_pntr;
 	uint32_t stripe_base;
 	uint32_t stripe_size;
 	uint32_t stripe_info_offset;
+	uint32_t bus_client;
+	uint32_t bus_idx;
+	uint32_t bus_master_flag;
 };
 #endif /* __MSM_CPP_H__ */

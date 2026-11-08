@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2015, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2017, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -26,6 +26,7 @@
 #include "ipa_hw_defs.h"
 #include "ipa_ram_mmap.h"
 #include "ipa_reg.h"
+#include "ipa_qmi_service.h"
 
 #define DRV_NAME "ipa"
 #define NAT_DEV_NAME "ipaNatTable"
@@ -39,6 +40,7 @@
 #define IPA_QMAP_HEADER_LENGTH (4)
 #define IPA_DL_CHECKSUM_LENGTH (8)
 #define IPA_NUM_DESC_PER_SW_TX (2)
+#define IPA_GENERIC_RX_POOL_SZ 192
 
 #define IPADBG(fmt, args...) \
 	pr_debug(DRV_NAME " %s:%d " fmt, __func__, __LINE__, ## args)
@@ -127,14 +129,14 @@
 
 #define IPA_HW_TABLE_ALIGNMENT(start_ofst) \
 	(((start_ofst) + 127) & ~127)
-#define IPA_RT_FLT_HW_RULE_BUF_SIZE	(128)
+#define IPA_RT_FLT_HW_RULE_BUF_SIZE	(256)
 
 #define IPA_HDR_PROC_CTX_TABLE_ALIGNMENT_BYTE 8
 #define IPA_HDR_PROC_CTX_TABLE_ALIGNMENT(start_ofst) \
 	(((start_ofst) + IPA_HDR_PROC_CTX_TABLE_ALIGNMENT_BYTE - 1) & \
 	~(IPA_HDR_PROC_CTX_TABLE_ALIGNMENT_BYTE - 1))
 
-#define MAX_RESOURCE_TO_CLIENTS (5)
+#define MAX_RESOURCE_TO_CLIENTS (IPA_CLIENT_MAX)
 #define IPA_MEM_PART(x_) (ipa_ctx->ctrl->mem_partition.x_)
 
 struct ipa_client_names {
@@ -224,6 +226,7 @@ struct ipa_rt_tbl {
  * @id: header entry id
  * @is_eth2_ofst_valid: is eth2_ofst field valid?
  * @eth2_ofst: offset to start of Ethernet-II/802.3 header
+ * @user_deleted: is the header deleted by the user?
  */
 struct ipa_hdr_entry {
 	struct list_head link;
@@ -241,6 +244,7 @@ struct ipa_hdr_entry {
 	int id;
 	u8 is_eth2_ofst_valid;
 	u16 eth2_ofst;
+	bool user_deleted;
 };
 
 /**
@@ -316,6 +320,7 @@ struct ipa_hdr_proc_ctx_add_hdr_cmd_seq {
  * @cookie: cookie used for validity check
  * @ref_cnt: reference counter of routing table
  * @id: processing context header entry id
+ * @user_deleted: is the hdr processing context deleted by the user?
  */
 struct ipa_hdr_proc_ctx_entry {
 	struct list_head link;
@@ -325,6 +330,7 @@ struct ipa_hdr_proc_ctx_entry {
 	u32 cookie;
 	u32 ref_cnt;
 	int id;
+	bool user_deleted;
 };
 
 /**
@@ -900,6 +906,85 @@ struct ipa_uc_hdlrs {
 };
 
 /**
+ * enum ipa_hw_flags - flags which defines the behavior of HW
+ *
+ * @IPA_HW_FLAG_HALT_SYSTEM_ON_ASSERT_FAILURE: Halt system in case of assert
+ *	failure.
+ * @IPA_HW_FLAG_NO_REPORT_MHI_CHANNEL_ERORR: Channel error would be reported
+ *	in the event ring only. No event to CPU.
+ * @IPA_HW_FLAG_NO_REPORT_MHI_CHANNEL_WAKE_UP: No need to report event
+ *	IPA_HW_2_CPU_EVENT_MHI_WAKE_UP_REQUEST
+ * @IPA_HW_FLAG_WORK_OVER_DDR: Perform all transaction to external addresses by
+ *	QMB (avoid memcpy)
+ * @IPA_HW_FLAG_NO_REPORT_OOB: If set do not report that the device is OOB in
+ *	IN Channel
+ * @IPA_HW_FLAG_NO_REPORT_DB_MODE: If set, do not report that the device is
+ *	entering a mode where it expects a doorbell to be rung for OUT Channel
+ * @IPA_HW_FLAG_NO_START_OOB_TIMER
+ */
+enum ipa_hw_flags {
+	IPA_HW_FLAG_HALT_SYSTEM_ON_ASSERT_FAILURE	= 0x01,
+	IPA_HW_FLAG_NO_REPORT_MHI_CHANNEL_ERORR		= 0x02,
+	IPA_HW_FLAG_NO_REPORT_MHI_CHANNEL_WAKE_UP	= 0x04,
+	IPA_HW_FLAG_WORK_OVER_DDR			= 0x08,
+	IPA_HW_FLAG_NO_REPORT_OOB			= 0x10,
+	IPA_HW_FLAG_NO_REPORT_DB_MODE			= 0x20,
+	IPA_HW_FLAG_NO_START_OOB_TIMER			= 0x40
+};
+
+/**
+ * enum ipa_hw_mhi_channel_states - MHI channel state machine
+ *
+ * Values are according to MHI specification
+ * @IPA_HW_MHI_CHANNEL_STATE_DISABLE: Channel is disabled and not processed by
+ *	the host or device.
+ * @IPA_HW_MHI_CHANNEL_STATE_ENABLE: A channel is enabled after being
+ *	initialized and configured by host, including its channel context and
+ *	associated transfer ring. While this state, the channel is not active
+ *	and the device does not process transfer.
+ * @IPA_HW_MHI_CHANNEL_STATE_RUN: The device processes transfers and doorbell
+ *	for channels.
+ * @IPA_HW_MHI_CHANNEL_STATE_SUSPEND: Used to halt operations on the channel.
+ *	The device does not process transfers for the channel in this state.
+ *	This state is typically used to synchronize the transition to low power
+ *	modes.
+ * @IPA_HW_MHI_CHANNEL_STATE_STOP: Used to halt operations on the channel.
+ *	The device does not process transfers for the channel in this state.
+ * @IPA_HW_MHI_CHANNEL_STATE_ERROR: The device detected an error in an element
+ *	from the transfer ring associated with the channel.
+ * @IPA_HW_MHI_CHANNEL_STATE_INVALID: Invalid state. Shall not be in use in
+ *	operational scenario.
+ */
+enum ipa_hw_mhi_channel_states {
+	IPA_HW_MHI_CHANNEL_STATE_DISABLE	= 0,
+	IPA_HW_MHI_CHANNEL_STATE_ENABLE		= 1,
+	IPA_HW_MHI_CHANNEL_STATE_RUN		= 2,
+	IPA_HW_MHI_CHANNEL_STATE_SUSPEND	= 3,
+	IPA_HW_MHI_CHANNEL_STATE_STOP		= 4,
+	IPA_HW_MHI_CHANNEL_STATE_ERROR		= 5,
+	IPA_HW_MHI_CHANNEL_STATE_INVALID	= 0xFF
+};
+
+/**
+ * Structure holding the parameters for IPA_CPU_2_HW_CMD_MHI_DL_UL_SYNC_INFO
+ * command. Parameters are sent as 32b immediate parameters.
+ * @isDlUlSyncEnabled: Flag to indicate if DL UL Syncronization is enabled
+ * @UlAccmVal: UL Timer Accumulation value (Period after which device will poll
+ *	for UL data)
+ * @ulMsiEventThreshold: Threshold at which HW fires MSI to host for UL events
+ * @dlMsiEventThreshold: Threshold at which HW fires MSI to host for DL events
+ */
+union IpaHwMhiDlUlSyncCmdData_t {
+	struct IpaHwMhiDlUlSyncCmdParams_t {
+		u32 isDlUlSyncEnabled:8;
+		u32 UlAccmVal:8;
+		u32 ulMsiEventThreshold:8;
+		u32 dlMsiEventThreshold:8;
+	} params;
+	u32 raw32b;
+};
+
+/**
  * struct ipa_uc_ctx - IPA uC context
  * @uc_inited: Indicates if uC interface has been initialized
  * @uc_loaded: Indicates if uC has loaded
@@ -912,7 +997,7 @@ struct ipa_uc_hdlrs {
  */
 struct ipa_uc_ctx {
 	bool uc_inited;
-	bool uc_loaded;
+	atomic_t uc_loaded;
 	bool uc_failed;
 	struct mutex uc_lock;
 	struct completion uc_completion;
@@ -936,6 +1021,8 @@ struct ipa_uc_wdi_ctx {
 	struct dma_pool *wdi_dma_pool;
 	u32 wdi_uc_stats_ofst;
 	struct IpaHwStatsWDIInfoData_t *wdi_uc_stats_mmio;
+	void *priv;
+	ipa_uc_ready_cb uc_ready_cb;
 };
 
 /**
@@ -948,6 +1035,16 @@ struct ipa_sps_pm {
 	spinlock_t lock;
 	bool res_granted;
 	bool res_rel_in_prog;
+};
+
+/**
+ * struct ipacm_client_info - the client-info indicated from IPACM
+ * @ipacm_client_enum: the enum to indicate tether-client
+ * @ipacm_client_uplink: the bool to indicate pipe for uplink
+ */
+struct ipacm_client_info {
+	enum ipacm_client_enum client_enum;
+	bool uplink;
 };
 
 /**
@@ -1106,6 +1203,9 @@ struct ipa_context {
 	struct ipa_uc_ctx uc_ctx;
 
 	struct ipa_uc_wdi_ctx uc_wdi_ctx;
+	u32 wan_rx_ring_size;
+	/* M-release support to know client pipes */
+	struct ipacm_client_info ipacm_client[IPA_NUM_PIPES];
 };
 
 /**
@@ -1152,6 +1252,7 @@ struct ipa_plat_drv_res {
 	enum ipa_hw_mode ipa_hw_mode;
 	u32 ee;
 	bool ipa_bam_remote_mode;
+	u32 wan_rx_ring_size;
 };
 
 struct ipa_mem_partition {
@@ -1260,6 +1361,15 @@ struct ipa_controller {
 
 extern struct ipa_context *ipa_ctx;
 
+/*
+ * Tethering client info
+ */
+void ipa_set_client(int index, enum ipacm_client_enum client, bool uplink);
+
+enum ipacm_client_enum ipa_get_client(int pipe_idx);
+
+bool ipa_get_client_uplink(int pipe_idx);
+
 int ipa_send_one(struct ipa_sys_context *sys, struct ipa_desc *desc,
 		bool in_atomic);
 int ipa_send(struct ipa_sys_context *sys, u32 num_desc, struct ipa_desc *desc,
@@ -1304,8 +1414,11 @@ void ipa_inc_client_enable_clks(void);
 int ipa_inc_client_enable_clks_no_block(void);
 void ipa_dec_client_disable_clks(void);
 int ipa_interrupts_init(u32 ipa_irq, u32 ee, struct device *ipa_dev);
+int ipa_del_hdr_by_user(struct ipa_ioc_del_hdr *hdls, bool by_user);
+int ipa_del_hdr_proc_ctx_by_user(struct ipa_ioc_del_hdr_proc_ctx *hdls,
+	bool by_user);
 int __ipa_del_rt_rule(u32 rule_hdl);
-int __ipa_del_hdr(u32 hdr_hdl);
+int __ipa_del_hdr(u32 hdr_hdl, bool by_user);
 int __ipa_release_hdr(u32 hdr_hdl);
 int __ipa_release_hdr_proc_ctx(u32 proc_ctx_hdl);
 int _ipa_read_gen_reg_v1_1(char *buff, int max_len);
@@ -1410,14 +1523,18 @@ int ipa_tag_process(struct ipa_desc *desc, int num_descs,
 		    unsigned long timeout);
 
 int ipa_q6_cleanup(void);
+int ipa_q6_pipe_reset(void);
 int ipa_init_q6_smem(void);
 
 int ipa_sps_connect_safe(struct sps_pipe *h, struct sps_connect *connect,
 			 enum ipa_client_type ipa_client);
 
+int ipa_mhi_handle_ipa_config_req(struct ipa_config_req_msg_v01 *config_req);
+
 int ipa_uc_interface_init(void);
 int ipa_uc_reset_pipe(enum ipa_client_type ipa_client);
 int ipa_uc_state_check(void);
+int ipa_uc_loaded_check(void);
 int ipa_uc_send_cmd(u32 cmd, u32 opcode, u32 expected_status,
 		    bool polling_mode, unsigned long timeout_jiffies);
 void ipa_register_panic_hdlr(void);
@@ -1427,4 +1544,21 @@ int create_nat_device(void);
 int ipa_uc_notify_clk_state(bool enabled);
 void ipa_dma_async_memcpy_notify_cb(void *priv,
 		enum ipa_dp_evt_type evt, unsigned long data);
+
+int ipa_uc_update_hw_flags(u32 flags);
+
+int ipa_uc_mhi_init(void (*ready_cb)(void), void (*wakeup_request_cb)(void));
+int ipa_uc_mhi_send_dl_ul_sync_info(union IpaHwMhiDlUlSyncCmdData_t cmd);
+int ipa_uc_mhi_init_engine(struct ipa_mhi_msi_info *msi, u32 mmio_addr,
+	u32 host_ctrl_addr, u32 host_data_addr, u32 first_ch_idx,
+	u32 first_evt_idx);
+int ipa_uc_mhi_init_channel(int ipa_ep_idx, int channelHandle,
+	int contexArrayIndex, int channelDirection);
+int ipa_uc_mhi_reset_channel(int channelHandle);
+int ipa_uc_mhi_suspend_channel(int channelHandle);
+int ipa_uc_mhi_resume_channel(int channelHandle, bool LPTransitionRejected);
+int ipa_uc_mhi_stop_event_update_channel(int channelHandle);
+int ipa_uc_mhi_print_stats(char *dbg_buff, int size);
+int ipa_uc_memcpy(phys_addr_t dest, phys_addr_t src, int len);
+void ipa_sps_irq_rx_notify_all(void);
 #endif /* _IPA_I_H_ */

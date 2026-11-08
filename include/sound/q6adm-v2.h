@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2014, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2017, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -34,7 +34,6 @@ enum {
 	ADM_AUDVOL_CAL,
 	ADM_RTAC_INFO_CAL,
 	ADM_RTAC_APR_CAL,
-	ADM_DTS_EAGLE,
 	ADM_SRS_TRUMEDIA,
 	ADM_MAX_CAL_TYPES
 };
@@ -53,14 +52,20 @@ struct route_payload {
 	unsigned int session_id;
 };
 
+struct msm_pcm_channel_mux {
+	int out_channel;
+	int input_channel;
+	u16 channel_config[16][16];
+};
+
 int srs_trumedia_open(int port_id, int copp_idx, __s32 srs_tech_id,
 		      void *srs_params);
 
 int adm_dts_eagle_set(int port_id, int copp_idx, int param_id,
-		      void *data, int size);
+		      void *data, uint32_t size);
 
 int adm_dts_eagle_get(int port_id, int copp_idx, int param_id,
-		      void *data, int size);
+		      void *data, uint32_t size);
 
 int adm_get_params(int port_id, int copp_idx, uint32_t module_id,
 		   uint32_t param_id, uint32_t params_length, char *params);
@@ -87,9 +92,9 @@ void adm_ec_ref_rx_id(int  port_id);
 
 int adm_get_lowlatency_copp_id(int port_id);
 
-void adm_set_multi_ch_map(char *channel_map);
+int adm_set_multi_ch_map(char *channel_map, int path);
 
-void adm_get_multi_ch_map(char *channel_map);
+int adm_get_multi_ch_map(char *channel_map, int path);
 
 int adm_validate_and_get_port_index(int port_id);
 
@@ -130,4 +135,10 @@ int adm_store_cal_data(int port_id, int copp_idx, int path, int perf_mode,
 int adm_send_compressed_device_mute(int port_id, int copp_idx, bool mute_on);
 
 int adm_send_compressed_device_latency(int port_id, int copp_idx, int latency);
+
+int programable_channel_mixer(int port_id, int copp_idx, int session_id,
+		int session_type, struct msm_pcm_channel_mux *ch_mux,
+		int num_ch);
+
+
 #endif /* __Q6_ADM_V2_H__ */

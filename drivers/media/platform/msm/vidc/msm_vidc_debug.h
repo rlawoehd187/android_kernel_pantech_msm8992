@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2014, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2014, 2017 The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -121,6 +121,7 @@ struct dentry *msm_vidc_debugfs_init_core(struct msm_vidc_core *core,
 		struct dentry *parent);
 struct dentry *msm_vidc_debugfs_init_inst(struct msm_vidc_inst *inst,
 		struct dentry *parent);
+void msm_vidc_debugfs_deinit_inst(struct msm_vidc_inst *inst);
 void msm_vidc_debugfs_update(struct msm_vidc_inst *inst,
 		enum msm_vidc_debugfs_event e);
 
@@ -159,10 +160,12 @@ static inline void show_stats(struct msm_vidc_inst *i)
 	for (x = 0; x < MAX_PROFILING_POINTS; x++) {
 		if ((i->debug.pdata[x].name[0])  &&
 			(msm_vidc_debug & VIDC_PROF)) {
-			dprintk(VIDC_PROF, "%s averaged %d ms/sample\n",
-				i->debug.pdata[x].name,
-				i->debug.pdata[x].cumulative /
+			if (i->debug.samples) {
+				dprintk(VIDC_PROF, "%s averaged %d ms/sample\n",
+					i->debug.pdata[x].name,
+					i->debug.pdata[x].cumulative /
 					i->debug.samples);
+			}
 			dprintk(VIDC_PROF, "%s Samples: %d\n",
 					i->debug.pdata[x].name,
 					i->debug.samples);

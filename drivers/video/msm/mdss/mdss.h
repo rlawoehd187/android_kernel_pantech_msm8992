@@ -117,11 +117,15 @@ enum mdss_bus_clients {
 	MDSS_MDP_RT,
 	MDSS_DSI_RT,
 	MDSS_MDP_NRT,
+	MDSS_IOMMU_RT,
 	MDSS_MAX_BUS_CLIENTS
 };
 
 enum mdss_hw_quirk {
 	MDSS_QUIRK_BWCPANIC,
+	MDSS_QUIRK_DOWNSCALE_HANG,
+	MDSS_QUIRK_DOWNSCALE_HFLIP_MDPCLK,
+	MDSS_QUIRK_SVS_PLUS_VOTING,
 	MDSS_QUIRK_MAX,
 };
 
@@ -141,6 +145,13 @@ struct mdss_data_type {
 	struct dss_io_data vbif_io;
 	struct dss_io_data vbif_nrt_io;
 	char __iomem *mdp_base;
+
+	/* Used to store if vote to enable svs plus has been sent or not */
+	u32 svs_plus_vote;
+	/* Min rate from where SVS plus vote is needed */
+	u32 svs_plus_min;
+	/* Max rate till where SVS plus vote is needed */
+	u32 svs_plus_max;
 
 	struct mutex reg_lock;
 
@@ -166,12 +177,14 @@ struct mdss_data_type {
 	u8 has_non_scalar_rgb;
 	bool has_src_split;
 	bool idle_pc_enabled;
+	bool needs_iommu_bw_vote;
 	bool has_pingpong_split;
 	bool has_pixel_ram;
 	bool needs_hist_vote;
 
-	u32 rotator_ot_limit;
-	u32 default_ot_limit;
+	u32 default_ot_rd_limit;
+	u32 default_ot_wr_limit;
+
 	u32 mdp_irq_mask;
 	u32 mdp_hist_irq_mask;
 
@@ -204,12 +217,15 @@ struct mdss_data_type {
 	u32 *vbif_rt_qos;
 	u32 *vbif_nrt_qos;
 	u32 npriority_lvl;
+	u32 bus_bw_cnt;
+	struct mutex bus_bw_lock;
 
 	u32 reg_bus_hdl;
 
 	struct mdss_fudge_factor ab_factor;
 	struct mdss_fudge_factor ib_factor;
 	struct mdss_fudge_factor ib_factor_overlap;
+	struct mdss_fudge_factor ib_factor_cmd;
 	struct mdss_fudge_factor clk_factor;
 
 	u32 disable_prefill;
@@ -268,10 +284,14 @@ struct mdss_data_type {
 	int iommu_attached;
 	struct mdss_iommu_map_type *iommu_map;
 
+	struct debug_bus *dbg_bus;
+	u32 dbg_bus_size;
 	struct mdss_debug_inf debug_inf;
 	bool mixer_switched;
 	struct mdss_panel_cfg pan_cfg;
 	struct mdss_prefill_data prefill_data;
+	u32 min_prefill_lines; /* this changes within different chipsets */
+	u32 props;
 
 	int handoff_pending;
 	bool idle_pc;
@@ -317,6 +337,8 @@ struct mdss_util_intf {
 	int (*get_iommu_domain)(u32 type);
 	int (*iommu_attached)(void);
 	int (*iommu_ctrl)(int enable);
+	void (*iommu_lock)(void);
+	void (*iommu_unlock)(void);
 	void (*bus_bandwidth_ctrl)(int enable);
 	int (*bus_scale_set_quota)(int client, u64 ab_quota, u64 ib_quota);
 	struct mdss_panel_cfg* (*panel_intf_type)(int intf_val);

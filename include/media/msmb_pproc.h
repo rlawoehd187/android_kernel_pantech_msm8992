@@ -13,13 +13,16 @@
 
 /* Should be same as VIDEO_MAX_PLANES in videodev2.h */
 #define MAX_PLANES VIDEO_MAX_PLANES
+/* PARTIAL_FRAME_STRIPE_COUNT must be even */
+#define PARTIAL_FRAME_STRIPE_COUNT 4
 
 #define MAX_NUM_CPP_STRIPS 8
 #define MSM_CPP_MAX_NUM_PLANES 3
 #define MSM_CPP_MIN_FRAME_LENGTH 13
-#define MSM_CPP_MAX_FRAME_LENGTH 2048
+#define MSM_CPP_MAX_FRAME_LENGTH 4096
 #define MSM_CPP_MAX_FW_NAME_LEN 32
 #define MAX_FREQ_TBL 10
+#define MSM_OUTPUT_BUF_CNT 8
 
 enum msm_cpp_frame_type {
 	MSM_CPP_OFFLINE_FRAME,
@@ -174,6 +177,20 @@ struct msm_cpp_stream_buff_info_t {
 	struct msm_cpp_buffer_info_t *buffer_info;
 };
 
+enum msm_cpp_batch_mode_t {
+	BATCH_MODE_NONE,
+	BATCH_MODE_VIDEO,
+	BATCH_MODE_PREVIEW
+};
+
+struct msm_cpp_batch_info_t {
+	enum msm_cpp_batch_mode_t  batch_mode;
+	uint32_t batch_size;
+	uint32_t intra_plane_offset[MAX_PLANES];
+	uint32_t pick_preview_idx;
+	uint32_t cont_idx;
+};
+
 struct msm_cpp_frame_info_t {
 	int32_t frame_id;
 	struct timeval timestamp;
@@ -192,11 +209,34 @@ struct msm_cpp_frame_info_t {
 	int32_t *status;
 	int32_t duplicate_output;
 	uint32_t duplicate_identity;
+	uint32_t feature_mask;
 	uint8_t we_disable;
 	struct msm_cpp_buffer_info_t input_buffer_info;
-	struct msm_cpp_buffer_info_t output_buffer_info[2];
+	struct msm_cpp_buffer_info_t output_buffer_info[MSM_OUTPUT_BUF_CNT];
+	struct msm_cpp_buffer_info_t duplicate_buffer_info;
 	struct msm_cpp_buffer_info_t tnr_scratch_buffer_info[2];
 	uint32_t reserved;
+	uint8_t partial_frame_indicator;
+	/* the followings are used only for partial_frame type
+	 * and is only used for offline frame processing and
+	 * only if payload big enough and need to be split into partial_frame
+	 * if first_payload, kernel acquires output buffer
+	 * first payload must have the last stripe
+	 * buffer addresses from 0 to last_stripe_index are updated.
+	 * kernel updates payload with msg_len and stripe_info
+	 * kernel sends top level, plane level, then only stripes
+	 * starting with first_stripe_index and
+	 * ends with last_stripe_index
+	 * kernel then sends trailing flag at frame done,
+	 * if last payload, kernel queues the output buffer to HAL
+	 */
+	uint8_t first_payload;
+	uint8_t last_payload;
+	uint32_t first_stripe_index;
+	uint32_t last_stripe_index;
+	uint32_t stripe_info_offset;
+	uint32_t stripe_info;
+	struct msm_cpp_batch_info_t  batch_info;
 };
 
 struct msm_cpp_pop_stream_info_t {
@@ -365,11 +405,34 @@ struct msm_cpp_frame_info32_t {
 	compat_int_t status;
 	int32_t duplicate_output;
 	uint32_t duplicate_identity;
+	uint32_t feature_mask;
 	uint8_t we_disable;
 	struct msm_cpp_buffer_info_t input_buffer_info;
-	struct msm_cpp_buffer_info_t output_buffer_info[2];
+	struct msm_cpp_buffer_info_t output_buffer_info[MSM_OUTPUT_BUF_CNT];
+	struct msm_cpp_buffer_info_t duplicate_buffer_info;
 	struct msm_cpp_buffer_info_t tnr_scratch_buffer_info[2];
 	uint32_t reserved;
+	uint8_t partial_frame_indicator;
+	/* the followings are used only for partial_frame type
+	 * and is only used for offline frame processing and
+	 * only if payload big enough and need to be split into partial_frame
+	 * if first_payload, kernel acquires output buffer
+	 * first payload must have the last stripe
+	 * buffer addresses from 0 to last_stripe_index are updated.
+	 * kernel updates payload with msg_len and stripe_info
+	 * kernel sends top level, plane level, then only stripes
+	 * starting with first_stripe_index and
+	 * ends with last_stripe_index
+	 * kernel then sends trailing flag at frame done,
+	 * if last payload, kernel queues the output buffer to HAL
+	 */
+	uint8_t first_payload;
+	uint8_t last_payload;
+	uint32_t first_stripe_index;
+	uint32_t last_stripe_index;
+	uint32_t stripe_info_offset;
+	uint32_t stripe_info;
+	struct msm_cpp_batch_info_t  batch_info;
 };
 
 struct msm_cpp_clock_settings32_t {

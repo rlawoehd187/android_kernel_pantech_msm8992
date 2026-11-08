@@ -142,6 +142,7 @@ enum ipa_client_type {
 	IPA_CLIENT_APPS_LAN_WAN_PROD,
 	IPA_CLIENT_APPS_CMD_PROD,
 	IPA_CLIENT_ODU_PROD,
+	IPA_CLIENT_MHI_PROD,
 	IPA_CLIENT_Q6_LAN_PROD,
 	IPA_CLIENT_Q6_CMD_PROD,
 	IPA_CLIENT_MEMCPY_DMA_SYNC_PROD,
@@ -176,6 +177,7 @@ enum ipa_client_type {
 	IPA_CLIENT_APPS_WAN_CONS,
 	IPA_CLIENT_ODU_EMB_CONS,
 	IPA_CLIENT_ODU_TETH_CONS,
+	IPA_CLIENT_MHI_CONS,
 	IPA_CLIENT_Q6_LAN_CONS,
 	IPA_CLIENT_Q6_WAN_CONS,
 	IPA_CLIENT_Q6_DUN_CONS,
@@ -225,6 +227,9 @@ enum ipa_client_type {
 	((client) == IPA_CLIENT_MEMCPY_DMA_SYNC_PROD || \
 	(client) == IPA_CLIENT_MEMCPY_DMA_ASYNC_PROD)
 
+#define IPA_CLIENT_IS_MHI_CONS(client) \
+	((client) == IPA_CLIENT_MHI_CONS)
+
 
 
 /**
@@ -267,6 +272,8 @@ enum ipa_flt_action {
  * wlan client connect ex: new wlan client connected
  * wlan scc switch: wlan interfaces in scc mode
  * wlan mcc switch: wlan interfaces in mcc mode
+ * wlan wdi enable: wdi data path completed
+ * wlan wdi disable: wdi data path teardown
  */
 enum ipa_wlan_event {
 	WLAN_CLIENT_CONNECT,
@@ -282,6 +289,8 @@ enum ipa_wlan_event {
 	WLAN_CLIENT_CONNECT_EX,
 	WLAN_SWITCH_TO_SCC,
 	WLAN_SWITCH_TO_MCC,
+	WLAN_WDI_ENABLE,
+	WLAN_WDI_DISABLE,
 	IPA_WLAN_EVENT_MAX
 };
 
@@ -301,7 +310,14 @@ enum ipa_wan_event {
 enum ipa_ecm_event {
 	ECM_CONNECT = IPA_WAN_EVENT_MAX,
 	ECM_DISCONNECT,
-	IPA_EVENT_MAX_NUM
+	IPA_ECM_EVENT_MAX,
+};
+
+enum ipa_tethering_stats_event {
+	IPA_TETHERING_STATS_UPDATE_STATS = IPA_ECM_EVENT_MAX,
+	IPA_TETHERING_STATS_UPDATE_NETWORK_STATS,
+	IPA_TETHERING_STATS_EVENT_MAX,
+	IPA_EVENT_MAX_NUM = IPA_TETHERING_STATS_EVENT_MAX
 };
 
 #define IPA_EVENT_MAX ((int)IPA_EVENT_MAX_NUM)
@@ -322,6 +338,7 @@ enum ipa_rm_resource_name {
 	IPA_RM_RESOURCE_WWAN_0_PROD,
 	IPA_RM_RESOURCE_WLAN_PROD,
 	IPA_RM_RESOURCE_ODU_ADAPT_PROD,
+	IPA_RM_RESOURCE_MHI_PROD,
 	IPA_RM_RESOURCE_PROD_MAX,
 
 	IPA_RM_RESOURCE_Q6_CONS = IPA_RM_RESOURCE_PROD_MAX,
@@ -330,6 +347,7 @@ enum ipa_rm_resource_name {
 	IPA_RM_RESOURCE_WLAN_CONS,
 	IPA_RM_RESOURCE_APPS_CONS,
 	IPA_RM_RESOURCE_ODU_ADAPT_CONS,
+	IPA_RM_RESOURCE_MHI_CONS,
 	IPA_RM_RESOURCE_MAX
 };
 
@@ -1297,7 +1315,11 @@ struct ipa_ioc_write_qmapid {
 	uint8_t qmap_id;
 };
 
-
+enum ipacm_client_enum {
+	IPACM_CLIENT_USB = 1,
+	IPACM_CLIENT_WLAN,
+	IPACM_CLIENT_MAX
+};
 /**
  *   actual IOCTLs supported by IPA driver
  */

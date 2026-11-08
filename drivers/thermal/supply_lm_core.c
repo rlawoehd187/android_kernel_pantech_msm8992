@@ -1,4 +1,4 @@
-/* Copyright (c) 2015, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2015-2016, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -302,6 +302,11 @@ static ssize_t supply_lm_input_write(struct file *fp,
 	enum corner_state cpu;
 	enum corner_state gpu;
 	enum corner_state modem;
+
+	if (count > (MODE_MAX - 1)) {
+		pr_err("Invalid user input\n");
+		return -EINVAL;
+	}
 
 	if (copy_from_user(&buf, user_buffer, count))
 		return -EFAULT;
@@ -1579,7 +1584,7 @@ static int supply_lm_therm_device_init(struct platform_device *pdev,
 		}
 	}
 
-	ret = sensor_mgr_init_threshold(
+	ret = sensor_mgr_init_threshold(&pdev->dev,
 				&supply_lm_therm_thresh[THERM_HOT - 1],
 				MONITOR_ALL_TSENS,
 				supply_lm_data->hot_temp_degC,
@@ -1592,7 +1597,7 @@ static int supply_lm_therm_device_init(struct platform_device *pdev,
 		goto therm_exit;
 	}
 
-	ret = sensor_mgr_init_threshold(
+	ret = sensor_mgr_init_threshold(&pdev->dev,
 				&supply_lm_therm_thresh[THERM_VERY_HOT - 1],
 				MONITOR_ALL_TSENS,
 				supply_lm_data->very_hot_temp_degC,
@@ -1653,9 +1658,9 @@ static void supply_lm_therm_cleanup(struct platform_device *pdev,
 		return;
 
 	if (supply_lm_therm_thresh) {
-		sensor_mgr_remove_threshold(
+		sensor_mgr_remove_threshold(&pdev->dev,
 			&supply_lm_therm_thresh[THERM_VERY_HOT - 1]);
-		sensor_mgr_remove_threshold(
+		sensor_mgr_remove_threshold(&pdev->dev,
 			&supply_lm_therm_thresh[THERM_HOT - 1]);
 		devm_kfree(&pdev->dev, supply_lm_therm_thresh);
 		supply_lm_therm_thresh = NULL;

@@ -45,7 +45,8 @@
 		qcom,max-bandwidth-per-pipe-kbps = <1800000>;
 		qcom,max-clk-rate = <400000000>;
 		qcom,mdss-dram-channels = <2>;
-		qcom,mdss-default-ot-limit = <16>;
+		qcom,mdss-default-ot-wr-limit = <16>;
+		qcom,mdss-default-ot-rd-limit = <16>;
 
 		qcom,mdss-pipe-vig-off = <0x00005000 0x00007000
 					  0x00009000 0x0000B000>;
@@ -73,10 +74,10 @@
 						<5 2 3 11 12 13>,
 						<5 4 5 14 15 16>,
 						<5 6 7 17 18 19>;
-		qcom,mdss-pipe-vig-fixed-mmb =	<1 20>,
-						<1 21>,
-						<1 22>,
-						<1 23>;
+		qcom,mdss-pipe-vig-fixed-mmb =	<2 20 24>,
+						<2 21 25>,
+						<2 22 26>,
+						<2 23 27>;
 
 		/* These Offsets are relative to "mdp_phys + mdp-reg-offset" address */
 		qcom,mdss-pipe-vig-clk-ctrl-offsets = <0x2AC 0 0>,
@@ -89,7 +90,8 @@
 						      <0x2C4 4 8>;
 		qcom,mdss-pipe-dma-clk-ctrl-offsets = <0x2AC 8 12>,
 						      <0x2B4 8 12>;
-
+		qcom,mdss-pipe-cursor-clk-ctrl-offsets = <0x3A8 16 15>,
+						         <0x3B0 16 15>;
 		qcom,mdss-pipe-sw-reset-off = <0x0028>;
 		qcom,mdss-pipe-vig-sw-reset-map = <5 6 7 8>;
 		qcom,mdss-pipe-rgb-sw-reset-map = <9 10 11 12>;
@@ -282,6 +284,7 @@
 		qcom,mmss-ulp-clamp-ctrl-offset = <0x14>;
 		qcom,mmss-phyreset-ctrl-offset = <0x108>;
 		qcom,timing-db-mode;
+		qcom,dsi-clk-ln-recovery;
 
 		qcom,core-supply-entries {
 			#address-cells = <1>;
@@ -317,7 +320,7 @@
 				qcom,supply-max-voltage = <1800000>;
 				qcom,supply-enable-load = <100000>;
 				qcom,supply-disable-load = <100>;
-				qcom,supply-post-on-sleep = <20>;
+				qcom,supply-post-on-sleep = <5>;
 			};
 
 			qcom,ctrl-supply-entry@2 {
@@ -341,7 +344,7 @@
 				qcom,supply-max-voltage = <1800000>;
 				qcom,supply-enable-load = <100000>;
 				qcom,supply-disable-load = <100>;
-				qcom,supply-post-on-sleep = <20>;
+				qcom,supply-post-on-sleep = <5>;
 			};
 		};
 	};
@@ -398,6 +401,7 @@
 		qcom,mmss-ulp-clamp-ctrl-offset = <0x14>;
 		qcom,mmss-phyreset-ctrl-offset = <0x108>;
 		qcom,timing-db-mode;
+		qcom,dsi-clk-ln-recovery;
 
 		qcom,core-supply-entries {
 			#address-cells = <1>;
@@ -433,7 +437,7 @@
 				qcom,supply-max-voltage = <1800000>;
 				qcom,supply-enable-load = <100000>;
 				qcom,supply-disable-load = <100>;
-				qcom,supply-post-on-sleep = <20>;
+				qcom,supply-post-on-sleep = <5>;
 			};
 
 			qcom,ctrl-supply-entry@2 {
@@ -457,7 +461,7 @@
 				qcom,supply-max-voltage = <1800000>;
 				qcom,supply-enable-load = <100000>;
 				qcom,supply-disable-load = <100>;
-				qcom,supply-post-on-sleep = <20>;
+				qcom,supply-post-on-sleep = <5>;
 			};
 		};
 	};

@@ -1,4 +1,4 @@
-/* Copyright (c) 2002,2007-2015, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2002,2007-2016, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -95,8 +95,17 @@ void adreno_ringbuffer_submit(struct adreno_ringbuffer *rb,
 		unsigned long flags;
 		local_irq_save(flags);
 
-		if (gpudev->alwayson_counter_read != NULL)
+		if (gpudev->alwayson_counter_read != NULL) {
 			time->ticks = gpudev->alwayson_counter_read(adreno_dev);
+
+			/*
+			 * Mask hi bits as they may be incorrect on
+			 * a4x and some a5x
+			 */
+			if (ADRENO_GPUREV(adreno_dev) >= 400 &&
+				ADRENO_GPUREV(adreno_dev) <= ADRENO_REV_A530)
+				time->ticks &= 0xFFFFFFFF;
+		}
 		else
 			time->ticks = 0;
 
@@ -235,15 +244,16 @@ static int _load_firmware(struct kgsl_device *device, const char *fwfile,
 	return (*data != NULL) ? 0 : -ENOMEM;
 }
 
-void adreno_ringbuffer_read_pm4_ucode(struct kgsl_device *device)
+int adreno_ringbuffer_read_pm4_ucode(struct kgsl_device *device)
 {
 	struct adreno_device *adreno_dev = ADRENO_DEVICE(device);
+	int ret;
 
 	if (adreno_dev->pm4_fw == NULL) {
 		int len;
 		void *ptr;
 
-		int ret = _load_firmware(device,
+		ret = _load_firmware(device,
 			adreno_dev->gpucore->pm4fw_name, &ptr, &len);
 
 		if (ret)
@@ -254,6 +264,7 @@ void adreno_ringbuffer_read_pm4_ucode(struct kgsl_device *device)
 			KGSL_DRV_ERR(device, "Bad pm4 microcode size: %d\n",
 				len);
 			kfree(ptr);
+			ret = -ENOMEM;
 			goto err;
 		}
 
@@ -262,11 +273,12 @@ void adreno_ringbuffer_read_pm4_ucode(struct kgsl_device *device)
 		adreno_dev->pm4_fw_version = adreno_dev->pm4_fw[1];
 	}
 
-	return;
+	return 0;
 
 err:
-	KGSL_DRV_FATAL(device, "Failed to read pm4 microcode %s\n",
+	KGSL_DRV_CRIT(device, "Failed to read pm4 microcode %s\n",
 		adreno_dev->gpucore->pm4fw_name);
+	return ret;
 }
 
 /**
@@ -292,15 +304,16 @@ static inline int adreno_ringbuffer_load_pm4_ucode(struct kgsl_device *device,
 	return 0;
 }
 
-void adreno_ringbuffer_read_pfp_ucode(struct kgsl_device *device)
+int adreno_ringbuffer_read_pfp_ucode(struct kgsl_device *device)
 {
 	struct adreno_device *adreno_dev = ADRENO_DEVICE(device);
+	int ret;
 
 	if (adreno_dev->pfp_fw == NULL) {
 		int len;
 		void *ptr;
 
-		int ret = _load_firmware(device,
+		ret = _load_firmware(device,
 			adreno_dev->gpucore->pfpfw_name, &ptr, &len);
 		if (ret)
 			goto err;
@@ -310,6 +323,7 @@ void adreno_ringbuffer_read_pfp_ucode(struct kgsl_device *device)
 			KGSL_DRV_ERR(device, "Bad PFP microcode size: %d\n",
 				len);
 			kfree(ptr);
+			ret = -ENOMEM;
 			goto err;
 		}
 
@@ -318,11 +332,12 @@ void adreno_ringbuffer_read_pfp_ucode(struct kgsl_device *device)
 		adreno_dev->pfp_fw_version = adreno_dev->pfp_fw[5];
 	}
 
-	return;
+	return 0;
 
 err:
-	KGSL_DRV_FATAL(device, "Failed to read pfp microcode %s\n",
+	KGSL_DRV_CRIT(device, "Failed to read pfp microcode %s\n",
 		adreno_dev->gpucore->pfpfw_name);
+	return ret;
 }
 
 /**
@@ -483,8 +498,8 @@ static int _ringbuffer_bootstrap_ucode(struct adreno_ringbuffer *rb,
 		kgsl_device_snapshot(device, NULL);
 	}
 
-	/* Clear the chicken bit for speed up on A430 cores */
-	if (adreno_is_a430(adreno_dev))
+	/* Clear the chicken bit for speed up on A430 and its derivatives */
+	if (!adreno_is_a420(adreno_dev))
 		kgsl_regwrite(device, A4XX_CP_DEBUG,
 					A4XX_CP_DEBUG_DEFAULT & ~(1 << 14));
 
@@ -780,7 +795,7 @@ adreno_ringbuffer_addcmds(struct adreno_ringbuffer *rb,
 
 	if (drawctxt != NULL && kgsl_context_detached(&drawctxt->base) &&
 		!(flags & KGSL_CMD_FLAGS_INTERNAL_ISSUE))
-		return -EINVAL;
+		return -ENOENT;
 
 	rb->timestamp++;
 
@@ -825,10 +840,6 @@ adreno_ringbuffer_addcmds(struct adreno_ringbuffer *rb,
 
 	total_sizedwords += (secured_ctxt) ? 26 : 0;
 
-	/* Add two dwords for the CP_INTERRUPT */
-	total_sizedwords +=
-		(drawctxt || (flags & KGSL_CMD_FLAGS_INTERNAL_ISSUE)) ?  2 : 0;
-
 	/* context rollover */
 	if (adreno_is_a3xx(adreno_dev))
 		total_sizedwords += 3;
@@ -858,8 +869,6 @@ adreno_ringbuffer_addcmds(struct adreno_ringbuffer *rb,
 	ringcmds = adreno_ringbuffer_allocspace(rb, total_sizedwords);
 	if (IS_ERR(ringcmds))
 		return PTR_ERR(ringcmds);
-	if (ringcmds == NULL)
-		return -ENOSPC;
 
 	*ringcmds++ = cp_nop_packet(1);
 	*ringcmds++ = KGSL_CMD_IDENTIFIER;
@@ -963,7 +972,11 @@ adreno_ringbuffer_addcmds(struct adreno_ringbuffer *rb,
 	 * set and hence the rb timestamp will be used in else statement below.
 	 */
 	*ringcmds++ = cp_type3_packet(CP_EVENT_WRITE, 3);
-	*ringcmds++ = CACHE_FLUSH_TS;
+
+	if (drawctxt || (flags & KGSL_CMD_FLAGS_INTERNAL_ISSUE))
+		*ringcmds++ = CACHE_FLUSH_TS | (1 << 31);
+	else
+		*ringcmds++ = CACHE_FLUSH_TS;
 
 	if (drawctxt && !(flags & KGSL_CMD_FLAGS_INTERNAL_ISSUE)) {
 		*ringcmds++ = gpuaddr + KGSL_MEMSTORE_OFFSET(context_id,
@@ -977,11 +990,6 @@ adreno_ringbuffer_addcmds(struct adreno_ringbuffer *rb,
 		*ringcmds++ = gpuaddr + KGSL_MEMSTORE_RB_OFFSET(rb,
 							eoptimestamp);
 		*ringcmds++ = timestamp;
-	}
-
-	if (drawctxt || (flags & KGSL_CMD_FLAGS_INTERNAL_ISSUE)) {
-		*ringcmds++ = cp_type3_packet(CP_INTERRUPT, 1);
-		*ringcmds++ = CP_INTERRUPT_RB;
 	}
 
 	if (adreno_is_a3xx(adreno_dev)) {
@@ -1140,7 +1148,7 @@ static bool _parse_ibs(struct kgsl_device_private *dev_priv,
 
 	level++;
 
-	KGSL_CMD_INFO(dev_priv->device, "ib: gpuaddr:0x%08x, wc:%d, hptr:%p\n",
+	KGSL_CMD_INFO(dev_priv->device, "ib: gpuaddr:0x%08x, wc:%d, hptr:%pK\n",
 		gpuaddr, sizedwords, hostaddr);
 
 	mb();
@@ -1162,7 +1170,7 @@ static bool _parse_ibs(struct kgsl_device_private *dev_priv,
 			break;
 		default:
 			KGSL_CMD_ERR(dev_priv->device, "unexpected type: "
-				"type:%d, word:0x%08x @ 0x%p, gpu:0x%08x\n",
+				"type:%d, word:0x%08x @ 0x%pK, gpu:0x%08x\n",
 				*hostaddr >> 30, *hostaddr, hostaddr,
 				gpuaddr+4*(sizedwords-dwords_left));
 			cur_ret = false;
@@ -1173,7 +1181,7 @@ static bool _parse_ibs(struct kgsl_device_private *dev_priv,
 		if (!cur_ret) {
 			KGSL_CMD_ERR(dev_priv->device,
 				"bad sub-type: #:%d/%d, v:0x%08x"
-				" @ 0x%p[gb:0x%08x], level:%d\n",
+				" @ 0x%pK[gb:0x%08x], level:%d\n",
 				sizedwords-dwords_left, sizedwords, *hostaddr,
 				hostaddr, gpuaddr+4*(sizedwords-dwords_left),
 				level);
@@ -1193,7 +1201,7 @@ static bool _parse_ibs(struct kgsl_device_private *dev_priv,
 		if (dwords_left < 0) {
 			KGSL_CMD_ERR(dev_priv->device,
 				"bad count: c:%d, #:%d/%d, "
-				"v:0x%08x @ 0x%p[gb:0x%08x], level:%d\n",
+				"v:0x%08x @ 0x%pK[gb:0x%08x], level:%d\n",
 				count, sizedwords-(dwords_left+count),
 				sizedwords, *(hostaddr-count), hostaddr-count,
 				gpuaddr+4*(sizedwords-(dwords_left+count)),
@@ -1213,7 +1221,7 @@ done:
 	if (!ret)
 		KGSL_DRV_ERR(dev_priv->device,
 			"parsing failed: gpuaddr:0x%08x, "
-			"host:0x%p, wc:%d\n", gpuaddr, hoststart, sizedwords);
+			"host:0x%pK, wc:%d\n", gpuaddr, hoststart, sizedwords);
 
 	level--;
 
@@ -1318,8 +1326,19 @@ static inline int _get_alwayson_counter(struct adreno_device *adreno_dev,
 	unsigned int *p = cmds;
 
 	*p++ = cp_type3_packet(CP_REG_TO_MEM, 2);
-	*p++ = adreno_getreg(adreno_dev, ADRENO_REG_RBBM_ALWAYSON_COUNTER_LO) |
-		(1 << 30) | (2 << 18);
+	/*
+	 * For a4x and some a5x the alwayson_hi read through CPU
+	 * will be masked. Only do 32 bit CP reads for keeping the
+	 * numbers consistent
+	 */
+	if (ADRENO_GPUREV(adreno_dev) >= 400 &&
+		ADRENO_GPUREV(adreno_dev) <= ADRENO_REV_A530)
+		*p++ = adreno_getreg(adreno_dev,
+			ADRENO_REG_RBBM_ALWAYSON_COUNTER_LO);
+	else
+		*p++ = adreno_getreg(adreno_dev,
+			ADRENO_REG_RBBM_ALWAYSON_COUNTER_LO) |
+			(1 << 30) | (2 << 18);
 	*p++ = gpuaddr;
 
 	return (unsigned int)(p - cmds);
@@ -1536,21 +1555,25 @@ int adreno_ringbuffer_submitcmd(struct adreno_device *adreno_dev,
 					&link[0], (cmds - link),
 					cmdbatch->timestamp, time);
 
-	/* Put the timevalues in the profiling buffer */
-	if (cmdbatch_user_profiling) {
-		profile_buffer->wall_clock_s = time->utime.tv_sec;
-		profile_buffer->wall_clock_ns = time->utime.tv_nsec;
-		profile_buffer->gpu_ticks_queued = time->ticks;
-	}
+	if (!ret) {
+		cmdbatch->global_ts = drawctxt->internal_timestamp;
 
-	/* Corresponding unmap to the memdesc map of profile_buffer */
-	if (entry)
-		kgsl_memdesc_unmap(&entry->memdesc);
+		/* Put the timevalues in the profiling buffer */
+		if (cmdbatch_user_profiling) {
+			profile_buffer->wall_clock_s = time->utime.tv_sec;
+			profile_buffer->wall_clock_ns = time->utime.tv_nsec;
+			profile_buffer->gpu_ticks_queued = time->ticks;
+		}
+	}
 
 	kgsl_cffdump_regpoll(device,
 		adreno_getreg(adreno_dev, ADRENO_REG_RBBM_STATUS) << 2,
 		0x00000000, 0x80000000);
 done:
+	/* Corresponding unmap to the memdesc map of profile_buffer */
+	if (entry)
+		kgsl_memdesc_unmap(&entry->memdesc);
+
 	trace_kgsl_issueibcmds(device, context->id, cmdbatch,
 			numibs, cmdbatch->timestamp,
 			cmdbatch->flags, ret, drawctxt->type);

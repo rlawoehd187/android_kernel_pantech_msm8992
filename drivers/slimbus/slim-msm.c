@@ -1,4 +1,4 @@
-/* Copyright (c) 2011-2014, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2011-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -198,8 +198,12 @@ static void msm_slim_disconn_pipe_port(struct msm_slim_ctrl *dev, u8 pn)
 {
 	struct msm_slim_endp *endpoint = &dev->pipes[pn];
 	struct sps_register_event sps_event;
+	u32 int_port = readl_relaxed(PGD_THIS_EE(PGD_PORT_INT_EN_EEn,
+					dev->ver));
 	writel_relaxed(0, PGD_PORT(PGD_PORT_CFGn, (endpoint->port_b),
 					dev->ver));
+	writel_relaxed((int_port & ~(1 << endpoint->port_b)),
+		PGD_THIS_EE(PGD_PORT_INT_EN_EEn, dev->ver));
 	/* Make sure port register is updated */
 	mb();
 	memset(&sps_event, 0, sizeof(sps_event));
@@ -468,15 +472,9 @@ void msm_slim_tx_msg_return(struct msm_slim_ctrl *dev, int err)
 		}
 		/* reclaim all packets that were delivered out of order */
 		if (idx != dev->tx_head)
-			pr_err("SLIM OUT OF ORDER TX:idx:%d, head:%d", idx,
-								dev->tx_head);
-		while (idx == dev->tx_head) {
-			dev->tx_head = (dev->tx_head + 1) % MSM_TX_BUFS;
-			idx++;
-			if (dev->tx_head == dev->tx_tail ||
-					dev->wr_comp[idx] != NULL)
-				break;
-		}
+			SLIM_WARN(dev, "SLIM OUT OF ORDER TX:idx:%d, head:%d",
+				idx, dev->tx_head);
+		dev->tx_head = (dev->tx_head + 1) % MSM_TX_BUFS;
 	}
 }
 
@@ -971,20 +969,22 @@ init_msgq:
 	if (ret && bam_handle)
 		dev->use_tx_msgqs = MSM_MSGQ_DISABLED;
 
-	if (dev->use_tx_msgqs == MSM_MSGQ_DISABLED &&
-		dev->use_rx_msgqs == MSM_MSGQ_DISABLED && bam_handle) {
-		sps_deregister_bam_device(bam_handle);
-		dev->bam.hdl = 0L;
-	}
+	/*
+	 * If command interface for BAM fails, register interface is used for
+	 * commands.
+	 * It is possible that other BAM usecases (e.g. apps channels) will
+	 * still need BAM. Since BAM is successfully initialized, we can
+	 * continue using it for non-command use cases.
+	 */
 
-	return ret;
+	return 0;
 }
 
 void msm_slim_disconnect_endp(struct msm_slim_ctrl *dev,
 					struct msm_slim_endp *endpoint,
 					enum msm_slim_msgq *msgq_flag)
 {
-	if (*msgq_flag == MSM_MSGQ_ENABLED) {
+	if (*msgq_flag >= MSM_MSGQ_ENABLED) {
 		sps_disconnect(endpoint->sps);
 		*msgq_flag = MSM_MSGQ_RESET;
 	}

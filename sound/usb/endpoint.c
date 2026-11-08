@@ -334,7 +334,7 @@ static void queue_pending_output_urbs(struct snd_usb_endpoint *ep)
 
 		err = usb_submit_urb(ctx->urb, GFP_ATOMIC);
 		if (err < 0)
-			snd_printk(KERN_ERR "Unable to submit urb #%d: %d (urb %p)\n",
+			snd_printk(KERN_ERR "Unable to submit urb #%d: %d (urb %pK)\n",
 				   ctx->index, err, ctx->urb);
 		else
 			set_bit(ctx->index, &ep->active_mask);
@@ -430,7 +430,7 @@ struct snd_usb_endpoint *snd_usb_add_endpoint(struct snd_usb_audio *chip,
 		if (ep->ep_num == ep_num &&
 		    ep->iface == alts->desc.bInterfaceNumber &&
 		    ep->alt_idx == alts->desc.bAlternateSetting) {
-			snd_printdd(KERN_DEBUG "Re-using EP %x in iface %d,%d @%p\n",
+			snd_printdd(KERN_DEBUG "Re-using EP %x in iface %d,%d @%pK\n",
 					ep_num, ep->iface, ep->alt_idx, ep);
 			goto __exit_unlock;
 		}
@@ -963,19 +963,30 @@ int snd_usb_endpoint_deactivate(struct snd_usb_endpoint *ep)
 }
 
 /**
+ * snd_usb_endpoint_release: Tear down an snd_usb_endpoint
+ *
+ * @ep: the endpoint to release
+ *
+ * This function does not care for the endpoint's use count but will tear
+ * down all the streaming URBs immediately.
+ */
+void snd_usb_endpoint_release(struct snd_usb_endpoint *ep)
+{
+	release_urbs(ep, 1);
+}
+
+/**
  * snd_usb_endpoint_free: Free the resources of an snd_usb_endpoint
  *
  * @ep: the list header of the endpoint to free
  *
- * This function does not care for the endpoint's use count but will tear
- * down all the streaming URBs immediately and free all resources.
+ * This free all resources of the given ep.
  */
 void snd_usb_endpoint_free(struct list_head *head)
 {
 	struct snd_usb_endpoint *ep;
 
 	ep = list_entry(head, struct snd_usb_endpoint, list);
-	release_urbs(ep, 1);
 	kfree(ep);
 }
 

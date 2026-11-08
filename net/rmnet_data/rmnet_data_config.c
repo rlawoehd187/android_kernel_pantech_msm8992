@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2014, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2013-2014, 2017 The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -25,6 +25,7 @@
 #include "rmnet_data_handlers.h"
 #include "rmnet_data_vnd.h"
 #include "rmnet_data_private.h"
+#include "rmnet_data_trace.h"
 
 RMNET_LOG_MODULE(RMNET_DATA_LOGMASK_CONFIG);
 
@@ -529,6 +530,11 @@ void rmnet_config_netlink_msg_handler(struct sk_buff *skb)
 	nlmsg_header = (struct nlmsghdr *) skb->data;
 	rmnet_header = (struct rmnet_nl_msg_s *) nlmsg_data(nlmsg_header);
 
+	if (!nlmsg_header->nlmsg_pid ||
+	    (nlmsg_header->nlmsg_len < sizeof(struct nlmsghdr) +
+				       sizeof(struct rmnet_nl_msg_s)))
+		return;
+
 	LOGL("Netlink message pid=%d, seq=%d, length=%d, rmnet_type=%d",
 		nlmsg_header->nlmsg_pid,
 		nlmsg_header->nlmsg_seq,
@@ -703,6 +709,7 @@ int rmnet_unassociate_network_device(struct net_device *dev)
 
 	/* Explicitly release the reference from the device */
 	dev_put(dev);
+	trace_rmnet_unassociate(dev);
 	return RMNET_CONFIG_OK;
 }
 
@@ -835,6 +842,7 @@ int rmnet_associate_network_device(struct net_device *dev)
 
 	/* Explicitly hold a reference to the device */
 	dev_hold(dev);
+	trace_rmnet_associate(dev);
 	return RMNET_CONFIG_OK;
 }
 
@@ -1146,6 +1154,7 @@ static void rmnet_force_unassociate_device(struct net_device *dev)
 		return;
 	}
 
+	trace_rmnet_unregister_cb_clear_vnds(dev);
 	/* Check the VNDs for offending mappings */
 	for (i = 0; i < RMNET_DATA_MAX_VND; i++) {
 		vndev = rmnet_vnd_get_by_id(i);
@@ -1160,13 +1169,20 @@ static void rmnet_force_unassociate_device(struct net_device *dev)
 			continue;
 		}
 		if (cfg->refcount && (cfg->egress_dev == dev)) {
+			/* Make sure the device is down before clearing any of
+			 * the mappings. Otherwise we could see a potential
+			 * race condition if packets are actively being
+			 * transmitted.
+			 */
+			dev_close(vndev);
 			rmnet_unset_logical_endpoint_config(vndev,
 						  RMNET_LOCAL_LOGICAL_ENDPOINT);
 			rmnet_free_vnd_later(i);
 		}
 	}
 
-	/* Clear on the mappings on the phys ep */
+	/* Clear the mappings on the phys ep */
+	trace_rmnet_unregister_cb_clear_lepcs(dev);
 	rmnet_unset_logical_endpoint_config(dev, RMNET_LOCAL_LOGICAL_ENDPOINT);
 	for (i = 0; i < RMNET_DATA_MAX_LOGICAL_EP; i++)
 		rmnet_unset_logical_endpoint_config(dev, i);
@@ -1195,13 +1211,16 @@ int rmnet_config_notify_cb(struct notifier_block *nb,
 	switch (event) {
 	case NETDEV_UNREGISTER_FINAL:
 	case NETDEV_UNREGISTER:
+		trace_rmnet_unregister_cb_entry(dev);
 		if (_rmnet_is_physical_endpoint_associated(dev)) {
 			LOGH("Kernel is trying to unregister %s", dev->name);
 			rmnet_force_unassociate_device(dev);
 		}
+		trace_rmnet_unregister_cb_exit(dev);
 		break;
 
 	default:
+		trace_rmnet_unregister_cb_unhandled(dev);
 		LOGD("Unhandeled event [%lu]", event);
 		break;
 	}

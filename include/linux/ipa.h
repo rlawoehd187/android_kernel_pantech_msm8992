@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2015, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2016, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -901,6 +901,30 @@ struct ipa_wdi_out_params {
 };
 
 /**
+ * struct ipa_wdi_db_params - information provided to retrieve
+ *       physical address of uC doorbell
+ * @client:	type of "client" (IPA_CLIENT_WLAN#_PROD/CONS)
+ * @uc_door_bell_pa: physical address of IPA uc doorbell
+ */
+struct ipa_wdi_db_params {
+	enum ipa_client_type client;
+	phys_addr_t uc_door_bell_pa;
+};
+
+/**
+ * struct  ipa_wdi_uc_ready_params - uC ready CB parameters
+ * @is_uC_ready: uC loaded or not
+ * @priv : callback cookie
+ * @notify:	callback
+ */
+typedef void (*ipa_uc_ready_cb)(void *priv);
+struct ipa_wdi_uc_ready_params {
+	bool is_uC_ready;
+	void *priv;
+	ipa_uc_ready_cb notify;
+};
+
+/**
  * struct odu_bridge_params - parameters for odu bridge initialization API
  *
  * @netdev_name: network interface name
@@ -922,6 +946,80 @@ struct odu_bridge_params {
 	int (*send_dl_skb)(void *priv, struct sk_buff *skb);
 	u8 device_ethaddr[ETH_ALEN];
 	u32 ipa_desc_size;
+};
+
+/**
+ * enum ipa_mhi_event_type - event type for mhi callback
+ *
+ * @IPA_MHI_EVENT_READY: IPA MHI is ready and IPA uC is loaded. After getting
+ *	this event MHI client is expected to call to ipa_mhi_start() API
+ * @IPA_MHI_EVENT_DATA_AVAILABLE: downlink data available on MHI channel
+ */
+enum ipa_mhi_event_type {
+	IPA_MHI_EVENT_READY,
+	IPA_MHI_EVENT_DATA_AVAILABLE,
+	IPA_MHI_EVENT_MAX,
+};
+
+typedef void (*mhi_client_cb)(void *priv, enum ipa_mhi_event_type event,
+	unsigned long data);
+
+/**
+ * struct ipa_mhi_msi_info - parameters for MSI (Message Signaled Interrupts)
+ * @addr_low: MSI lower base physical address
+ * @addr_hi: MSI higher base physical address
+ * @data: Data Pattern to use when generating the MSI
+ * @mask: Mask indicating number of messages assigned by the host to device
+ *
+ * msi value is written according to this formula:
+ *	((data & ~mask) | (mmio.msiVec & mask))
+ */
+struct ipa_mhi_msi_info {
+	u32 addr_low;
+	u32 addr_hi;
+	u32 data;
+	u32 mask;
+};
+
+/**
+ * struct ipa_mhi_init_params - parameters for IPA MHI initialization API
+ *
+ * @msi: MSI (Message Signaled Interrupts) parameters
+ * @mmio_addr: MHI MMIO physical address
+ * @first_ch_idx: First channel ID for hardware accelerated channels.
+ * @first_er_idx: First event ring ID for hardware accelerated channels.
+ * @notify: client callback
+ * @priv: client private data to be provided in client callback
+ */
+struct ipa_mhi_init_params {
+	struct ipa_mhi_msi_info msi;
+	u32 mmio_addr;
+	u32 first_ch_idx;
+	u32 first_er_idx;
+	mhi_client_cb notify;
+	void *priv;
+};
+
+/**
+ * struct ipa_mhi_start_params - parameters for IPA MHI start API
+ *
+ * @host_ctrl_addr: Base address of MHI control data structures
+ * @host_data_addr: Base address of MHI data buffers
+ */
+struct ipa_mhi_start_params {
+	u32 host_ctrl_addr;
+	u32 host_data_addr;
+};
+
+/**
+ * struct ipa_mhi_connect_params - parameters for IPA MHI channel connect API
+ *
+ * @sys: IPA EP configuration info
+ * @channel_id: MHI channel id
+ */
+struct ipa_mhi_connect_params {
+	struct ipa_sys_connect_params sys;
+	u8 channel_id;
 };
 
 #ifdef CONFIG_IPA
@@ -1097,6 +1195,22 @@ int ipa_resume_wdi_pipe(u32 clnt_hdl);
 int ipa_suspend_wdi_pipe(u32 clnt_hdl);
 int ipa_get_wdi_stats(struct IpaHwStatsWDIInfoData_t *stats);
 u16 ipa_get_smem_restr_bytes(void);
+/*
+ * To retrieve doorbell physical address of
+ * wlan pipes
+ */
+int ipa_uc_wdi_get_dbpa(struct ipa_wdi_db_params *out);
+
+/*
+ * To register uC ready callback if uC not ready
+ * and also check uC readiness
+ * if uC not ready only, register callback
+ */
+int ipa_uc_reg_rdyCB(struct ipa_wdi_uc_ready_params *param);
+/*
+ * To de-register uC ready callback
+ */
+int ipa_uc_dereg_rdyCB(void);
 
 /*
  * Resource manager
@@ -1148,6 +1262,15 @@ int teth_bridge_disconnect(enum ipa_client_type client);
 int teth_bridge_connect(struct teth_bridge_connect_params *connect_params);
 
 /*
+ * Tethering client info
+ */
+void ipa_set_client(int index, enum ipacm_client_enum client, bool uplink);
+
+enum ipacm_client_enum ipa_get_client(int pipe_idx);
+
+bool ipa_get_client_uplink(int pipe_idx);
+
+/*
  * ODU bridge
  */
 
@@ -1175,7 +1298,26 @@ int ipa_dma_sync_memcpy(phys_addr_t dest, phys_addr_t src, int len);
 int ipa_dma_async_memcpy(phys_addr_t dest, phys_addr_t src, int len,
 			void (*user_cb)(void *user1), void *user_param);
 
+int ipa_dma_uc_memcpy(phys_addr_t dest, phys_addr_t src, int len);
+
 void ipa_dma_destroy(void);
+
+/*
+ * MHI
+ */
+int ipa_mhi_init(struct ipa_mhi_init_params *params);
+
+int ipa_mhi_start(struct ipa_mhi_start_params *params);
+
+int ipa_mhi_connect_pipe(struct ipa_mhi_connect_params *in, u32 *clnt_hdl);
+
+int ipa_mhi_disconnect_pipe(u32 clnt_hdl);
+
+int ipa_mhi_suspend(bool force);
+
+int ipa_mhi_resume(void);
+
+int ipa_mhi_destroy(void);
 
 /*
  * mux id
@@ -1596,6 +1738,24 @@ static inline int ipa_suspend_wdi_pipe(u32 clnt_hdl)
 	return -EPERM;
 }
 
+static inline int ipa_uc_wdi_get_dbpa(
+	struct ipa_wdi_db_params *out)
+{
+	return -EPERM;
+}
+
+static inline int ipa_uc_reg_rdyCB(
+	struct ipa_wdi_uc_ready_params *param)
+{
+	return -EPERM;
+}
+
+static inline int ipa_uc_dereg_rdyCB(void)
+{
+	return -EPERM;
+}
+
+
 /*
  * Resource manager
  */
@@ -1707,6 +1867,25 @@ static inline int teth_bridge_connect(struct teth_bridge_connect_params
 }
 
 /*
+ * Tethering client info
+ */
+static inline void ipa_set_client(int index, enum ipacm_client_enum client,
+	bool uplink)
+{
+}
+
+static inline enum ipacm_client_enum ipa_get_client(int pipe_idx)
+{
+	return -EPERM;
+}
+
+static inline bool ipa_get_client_uplink(int pipe_idx)
+{
+	return -EPERM;
+}
+
+
+/*
  * ODU bridge
  */
 static inline int odu_bridge_init(struct odu_bridge_params *params)
@@ -1766,9 +1945,53 @@ static inline int ipa_dma_async_memcpy(phys_addr_t dest, phys_addr_t src
 	return -EPERM;
 }
 
+static inline int ipa_dma_uc_memcpy(phys_addr_t dest, phys_addr_t src, int len)
+{
+	return -EPERM;
+}
+
 static inline void ipa_dma_destroy(void)
 {
 	return;
+}
+
+/*
+ * MHI
+ */
+static inline int ipa_mhi_init(struct ipa_mhi_init_params *params)
+{
+	return -EPERM;
+}
+
+static inline int ipa_mhi_start(struct ipa_mhi_start_params *params)
+{
+	return -EPERM;
+}
+
+static inline int ipa_mhi_connect_pipe(struct ipa_mhi_connect_params *in,
+	u32 *clnt_hdl)
+{
+	return -EPERM;
+}
+
+static inline int ipa_mhi_disconnect_pipe(u32 clnt_hdl)
+{
+	return -EPERM;
+}
+
+static inline int ipa_mhi_suspend(bool force)
+{
+	return -EPERM;
+}
+
+static inline int ipa_mhi_resume(void)
+{
+	return -EPERM;
+}
+
+static inline int ipa_mhi_destroy(void)
+{
+	return -EPERM;
 }
 
 /*

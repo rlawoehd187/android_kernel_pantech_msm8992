@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2014, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -19,7 +19,7 @@
 #include "mpq_dmx_plugin_common.h"
 #include "mpq_sdmx.h"
 
-#define SDMX_MAJOR_VERSION_MATCH	(5)
+#define SDMX_MAJOR_VERSION_MATCH	(7)
 
 /* Length of mandatory fields that must exist in header of video PES */
 #define PES_MANDATORY_FIELDS_LEN			9
@@ -1619,6 +1619,7 @@ static int mpq_sdmx_alloc_data_buf(struct mpq_feed *mpq_feed, size_t size)
 		0);
 	if (IS_ERR_OR_NULL(mpq_feed->sdmx_buf_handle)) {
 		ret = PTR_ERR(mpq_feed->sdmx_buf_handle);
+		mpq_feed->sdmx_buf_handle = NULL;
 		MPQ_DVB_ERR_PRINT(
 			"%s: FAILED to allocate sdmx buffer %d\n",
 			__func__, ret);
@@ -1681,6 +1682,7 @@ static int mpq_sdmx_init_metadata_buffer(struct mpq_demux *mpq_demux,
 		0);
 	if (IS_ERR_OR_NULL(feed->metadata_buf_handle)) {
 		ret = PTR_ERR(feed->metadata_buf_handle);
+		feed->metadata_buf_handle = NULL;
 		MPQ_DVB_ERR_PRINT(
 			"%s: FAILED to allocate metadata buffer %d\n",
 			__func__, ret);
@@ -1804,7 +1806,11 @@ int mpq_dmx_terminate_feed(struct dvb_demux_feed *feed)
 		}
 
 		mpq_sdmx_close_session(mpq_demux);
-		mpq_demux->num_secure_feeds--;
+		if (mpq_demux->num_secure_feeds > 0)
+			mpq_demux->num_secure_feeds--;
+		else
+			MPQ_DVB_DBG_PRINT("%s: Invalid secure feed count= %u\n",
+				 __func__, mpq_demux->num_secure_feeds);
 	}
 
 	if (dvb_dmx_is_video_feed(feed)) {
@@ -1821,7 +1827,11 @@ int mpq_dmx_terminate_feed(struct dvb_demux_feed *feed)
 	}
 
 	mpq_sdmx_terminate_metadata_buffer(mpq_feed);
-	mpq_demux->num_active_feeds--;
+	if (mpq_demux->num_active_feeds > 0)
+		mpq_demux->num_active_feeds--;
+	else
+		MPQ_DVB_DBG_PRINT("%s: Invalid num_active_feeds count = %u\n",
+				  __func__, mpq_demux->num_active_feeds);
 
 	mutex_unlock(&mpq_demux->mutex);
 

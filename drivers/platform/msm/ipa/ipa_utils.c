@@ -67,6 +67,7 @@ static const int ep_mapping[2][IPA_CLIENT_MAX] = {
 	[IPA_1_1][IPA_CLIENT_APPS_LAN_WAN_PROD]  =  2,
 	[IPA_1_1][IPA_CLIENT_APPS_CMD_PROD]      =  1,
 	[IPA_1_1][IPA_CLIENT_ODU_PROD]           = -1,
+	[IPA_1_1][IPA_CLIENT_MHI_PROD]           = -1,
 	[IPA_1_1][IPA_CLIENT_Q6_LAN_PROD]        =  5,
 	[IPA_1_1][IPA_CLIENT_Q6_CMD_PROD]        = -1,
 
@@ -91,6 +92,7 @@ static const int ep_mapping[2][IPA_CLIENT_MAX] = {
 	[IPA_1_1][IPA_CLIENT_APPS_WAN_CONS]      = -1,
 	[IPA_1_1][IPA_CLIENT_ODU_EMB_CONS]       = -1,
 	[IPA_1_1][IPA_CLIENT_ODU_TETH_CONS]      = -1,
+	[IPA_1_1][IPA_CLIENT_MHI_CONS]           = -1,
 	[IPA_1_1][IPA_CLIENT_Q6_LAN_CONS]        =  4,
 	[IPA_1_1][IPA_CLIENT_Q6_WAN_CONS]        = -1,
 
@@ -111,6 +113,7 @@ static const int ep_mapping[2][IPA_CLIENT_MAX] = {
 	[IPA_2_0][IPA_CLIENT_APPS_LAN_WAN_PROD]  =  4,
 	[IPA_2_0][IPA_CLIENT_APPS_CMD_PROD]      =  3,
 	[IPA_2_0][IPA_CLIENT_ODU_PROD]           = 12,
+	[IPA_2_0][IPA_CLIENT_MHI_PROD]           = 18,
 	[IPA_2_0][IPA_CLIENT_Q6_LAN_PROD]        =  6,
 	[IPA_2_0][IPA_CLIENT_Q6_CMD_PROD]        =  7,
 	[IPA_2_0][IPA_CLIENT_MEMCPY_DMA_SYNC_PROD]
@@ -145,6 +148,7 @@ static const int ep_mapping[2][IPA_CLIENT_MAX] = {
 	[IPA_2_0][IPA_CLIENT_APPS_WAN_CONS]      =  5,
 	[IPA_2_0][IPA_CLIENT_ODU_EMB_CONS]       = 13,
 	[IPA_2_0][IPA_CLIENT_ODU_TETH_CONS]      =  1,
+	[IPA_2_0][IPA_CLIENT_MHI_CONS]           = 17,
 	[IPA_2_0][IPA_CLIENT_Q6_LAN_CONS]        =  8,
 	[IPA_2_0][IPA_CLIENT_Q6_WAN_CONS]        =  9,
 	[IPA_2_0][IPA_CLIENT_Q6_DUN_CONS]        = 10,
@@ -339,11 +343,17 @@ int ipa_get_clients_from_rm_resource(
 		clients->names[i++] = IPA_CLIENT_WLAN3_CONS;
 		clients->names[i++] = IPA_CLIENT_WLAN4_CONS;
 		break;
+	case IPA_RM_RESOURCE_MHI_CONS:
+		clients->names[i++] = IPA_CLIENT_MHI_CONS;
+		break;
 	case IPA_RM_RESOURCE_USB_PROD:
 		clients->names[i++] = IPA_CLIENT_USB_PROD;
 		break;
 	case IPA_RM_RESOURCE_HSIC_PROD:
 		clients->names[i++] = IPA_CLIENT_HSIC1_PROD;
+		break;
+	case IPA_RM_RESOURCE_MHI_PROD:
+		clients->names[i++] = IPA_CLIENT_MHI_PROD;
 		break;
 	default:
 		break;
@@ -377,6 +387,7 @@ bool ipa_should_pipe_be_suspended(enum ipa_client_type client)
 		return false;
 
 	if (client == IPA_CLIENT_USB_CONS   ||
+	    client == IPA_CLIENT_MHI_CONS   ||
 	    client == IPA_CLIENT_HSIC1_CONS ||
 	    client == IPA_CLIENT_WLAN1_CONS ||
 	    client == IPA_CLIENT_WLAN2_CONS ||
@@ -592,7 +603,7 @@ void _ipa_sram_settings_read_v2_0(void)
 	ipa_ctx->hdr_tbl_lcl = 0;
 	ipa_ctx->ip4_rt_tbl_lcl = 0;
 	ipa_ctx->ip6_rt_tbl_lcl = 0;
-	ipa_ctx->ip4_flt_tbl_lcl = 1;
+	ipa_ctx->ip4_flt_tbl_lcl = 0;
 	ipa_ctx->ip6_flt_tbl_lcl = 0;
 }
 
@@ -773,6 +784,53 @@ int ipa_get_ep_mapping(enum ipa_client_type client)
 	return ep_mapping[hw_type_index][client];
 }
 EXPORT_SYMBOL(ipa_get_ep_mapping);
+
+/* ipa_set_client() - provide client mapping
+ * @client: client type
+ *
+ * Return value: none
+ */
+void ipa_set_client(int index, enum ipacm_client_enum client, bool uplink)
+{
+	if (client >= IPACM_CLIENT_MAX || client < IPACM_CLIENT_USB) {
+		IPAERR("Bad client number! client =%d\n", client);
+	} else if (index >= IPA_NUM_PIPES || index < 0) {
+		IPAERR("Bad pipe index! index =%d\n", index);
+	} else {
+		ipa_ctx->ipacm_client[index].client_enum = client;
+		ipa_ctx->ipacm_client[index].uplink = uplink;
+	}
+}
+EXPORT_SYMBOL(ipa_set_client);
+
+/**
+ * ipa_get_client() - provide client mapping
+ * @client: client type
+ *
+ * Return value: none
+ */
+enum ipacm_client_enum ipa_get_client(int pipe_idx)
+{
+	if (pipe_idx >= IPA_NUM_PIPES || pipe_idx < 0) {
+		IPAERR("Bad pipe index! pipe_idx =%d\n", pipe_idx);
+		return IPACM_CLIENT_MAX;
+	} else {
+		return ipa_ctx->ipacm_client[pipe_idx].client_enum;
+	}
+}
+EXPORT_SYMBOL(ipa_get_client);
+
+/**
+ * ipa_get_client_uplink() - provide client mapping
+ * @client: client type
+ *
+ * Return value: none/
+ */
+bool ipa_get_client_uplink(int pipe_idx)
+{
+	return ipa_ctx->ipacm_client[pipe_idx].uplink;
+}
+EXPORT_SYMBOL(ipa_get_client_uplink);
 
 /**
  * ipa_get_rm_resource_from_ep() - get the IPA_RM resource which is related to
@@ -4193,9 +4251,11 @@ int ipa_tag_process(struct ipa_desc desc[],
 	desc_idx++;
 
 	/* Copy the required descriptors from the client now */
-	memcpy(&(tag_desc[desc_idx]), desc, descs_num *
-		sizeof(struct ipa_desc));
-	desc_idx += descs_num;
+	if (desc) {
+		memcpy(&(tag_desc[desc_idx]), desc, descs_num *
+			sizeof(struct ipa_desc));
+		desc_idx += descs_num;
+	}
 
 	comp = kzalloc(sizeof(*comp), GFP_KERNEL);
 	if (!comp) {

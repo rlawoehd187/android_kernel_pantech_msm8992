@@ -29,7 +29,13 @@ struct panel_id {
 #define DEFAULT_ROTATOR_FRAME_RATE 120
 #define ROTATOR_LOW_FRAME_RATE 30
 #define MDSS_DSI_RST_SEQ_LEN	10
-#define MDSS_MDP_MAX_FETCH 12
+/* worst case prefill lines for all chipsets including all vertical blank */
+#define MDSS_MDP_MAX_PREFILL_FETCH 25
+
+#define OVERRIDE_CFG	"override"
+#define SIM_PANEL	"sim"
+#define SIM_SW_TE_PANEL	"sim-swte"
+#define SIM_HW_TE_PANEL	"sim-hwte"
 
 /* panel type list */
 #define NO_PANEL		0xffff	/* No Panel */
@@ -108,6 +114,21 @@ enum {
 	MODE_GPIO_LOW,
 };
 
+/*
+ * enum sim_panel_modes - Different panel modes for simulator panels
+ *
+ * @SIM_MODE:		Disables all host reads for video mode simulator panels.
+ * @SIM_SW_TE_MODE:	Disables all host reads and genereates the SW TE. Used
+ *                      for cmd mode simulator panels.
+ * @SIM_HW_TE_MODE:	Disables all host reads and expects TE from hardware
+ *                      (terminator card). Used for cmd mode simulator panels.
+ */
+enum {
+	SIM_MODE = 1,
+	SIM_SW_TE_MODE,
+	SIM_HW_TE_MODE,
+};
+
 struct mdss_rect {
 	u16 x;
 	u16 y;
@@ -183,7 +204,7 @@ struct mdss_intf_recovery {
  *				- 1: update to command mode
  * @MDSS_EVENT_REGISTER_RECOVERY_HANDLER: Event to recover the interface in
  *					case there was any errors detected.
- * @ MDSS_EVENT_DSI_PANEL_STATUS:Event to check the panel status
+ * @MDSS_EVENT_DSI_PANEL_STATUS: Event to check the panel status
  *				<= 0: panel check fail
  *				>  0: panel check success
  * @MDSS_EVENT_DSI_DYNAMIC_SWITCH: Send DCS command to panel to initiate
@@ -193,6 +214,10 @@ struct mdss_intf_recovery {
  * @MDSS_EVENT_DSI_RECONFIG_CMD: Setup DSI controller in new mode
  *				- MIPI_VIDEO_PANEL: switch to video mode
  *				- MIPI_CMD_PANEL: switch to command mode
+ * @MDSS_EVENT_DSI_RESET_WRITE_PTR: Reset the write pointer coordinates on
+ *				the panel.
+ * @MDSS_EVENT_PANEL_TIMING_SWITCH: Panel timing switch is requested.
+ *				Argument provided is new panel timing.
  */
 enum mdss_intf_events {
 	MDSS_EVENT_RESET = 1,
@@ -219,6 +244,8 @@ enum mdss_intf_events {
 	MDSS_EVENT_DSI_PANEL_STATUS,
 	MDSS_EVENT_DSI_DYNAMIC_SWITCH,
 	MDSS_EVENT_DSI_RECONFIG_CMD,
+	MDSS_EVENT_DSI_RESET_WRITE_PTR,
+	MDSS_EVENT_PANEL_TIMING_SWITCH,
 };
 
 struct lcd_panel_info {
@@ -239,6 +266,8 @@ struct lcd_panel_info {
 	u32 xres_pad;
 	/* Pad height */
 	u32 yres_pad;
+	u32 h_polarity;
+	u32 v_polarity;
 };
 
 
@@ -258,6 +287,14 @@ enum dynamic_mode_switch {
 	DYNAMIC_MODE_SWITCH_DISABLED = 0,
 	DYNAMIC_MODE_SWITCH_SUSPEND_RESUME,
 	DYNAMIC_MODE_SWITCH_IMMEDIATE,
+	DYNAMIC_MODE_RESOLUTION_SWITCH_IMMEDIATE,
+};
+
+enum dynamic_switch_modes {
+	SWITCH_MODE_UNKNOWN = 0,
+	SWITCH_TO_CMD_MODE,
+	SWITCH_TO_VIDEO_MODE,
+	SWITCH_RESOLUTION,
 };
 
 struct mipi_panel_info {
@@ -327,6 +364,7 @@ enum dynamic_fps_update {
 	DFPS_IMMEDIATE_CLK_UPDATE_MODE,
 	DFPS_IMMEDIATE_PORCH_UPDATE_MODE_VFP,
 	DFPS_IMMEDIATE_PORCH_UPDATE_MODE_HFP,
+	DFPS_MODE_MAX
 };
 
 enum lvds_mode {
@@ -392,6 +430,7 @@ struct mdss_panel_info {
 	u32 clk_rate;
 	u32 clk_min;
 	u32 clk_max;
+	u32 mdp_transfer_time_us;
 	u32 frame_count;
 	u32 is_3d_panel;
 	u32 out_format;
@@ -423,7 +462,8 @@ struct mdss_panel_info {
 
 	u32 cont_splash_enabled;
 	bool esd_rdy;
-	u32 partial_update_enabled;
+	bool partial_update_supported; /* value from dts if pu is supported */
+	bool partial_update_enabled; /* is pu currently allowed */
 	u32 dcs_cmd_by_left;
 	u32 partial_update_roi_merge;
 	struct ion_handle *splash_ihdl;
@@ -431,12 +471,16 @@ struct mdss_panel_info {
 	int blank_state;
 
 	uint32_t panel_dead;
+	u32 panel_force_dead;
 	u32 panel_orientation;
 	bool dynamic_switch_pending;
 	bool is_lpm_mode;
 	bool is_split_display;
 
 	bool is_prim_panel;
+
+	/* refer sim_panel_modes enum for different modes */
+	u8 sim_panel_mode;
 
 	char panel_name[MDSS_MAX_PANEL_LEN];
 	struct mdss_mdp_pp_tear_check te;
@@ -449,6 +493,33 @@ struct mdss_panel_info {
 
 	/* debugfs structure for the panel */
 	struct mdss_panel_debugfs_info *debugfs_info;
+};
+
+struct mdss_panel_timing {
+	struct list_head list;
+	const char *name;
+
+	u32 xres;
+	u32 yres;
+
+	u32 h_back_porch;
+	u32 h_front_porch;
+	u32 h_pulse_width;
+	u32 hsync_skew;
+	u32 v_back_porch;
+	u32 v_front_porch;
+	u32 v_pulse_width;
+
+	u32 border_top;
+	u32 border_bottom;
+	u32 border_left;
+	u32 border_right;
+
+	u32 clk_rate;
+	char frame_rate;
+
+	struct fbc_panel_info fbc;
+	struct mdss_mdp_pp_tear_check te;
 };
 
 struct mdss_panel_data {
@@ -470,17 +541,18 @@ struct mdss_panel_data {
 	 */
 	int (*event_handler) (struct mdss_panel_data *pdata, int e, void *arg);
 
+	struct list_head timings_list;
+	struct mdss_panel_timing *current_timing;
+	bool active;
+
 	struct mdss_panel_data *next;
 };
 
 struct mdss_panel_debugfs_info {
 	struct dentry *root;
-	u32 xres;
-	u32 yres;
-	struct lcd_panel_info lcdc;
-	struct fbc_panel_info fbc;
+	struct dentry *parent;
+	struct mdss_panel_info panel_info;
 	u32 override_flag;
-	char frame_rate;
 	struct mdss_panel_debugfs_info *next;
 };
 
@@ -526,85 +598,6 @@ static inline u32 mdss_panel_get_framerate(struct mdss_panel_info *panel_info)
 }
 
 /*
- * mdss_rect_cmp() - compares two rects
- * @rect1 - rect value to compare
- * @rect2 - rect value to compare
- *
- * Returns 1 if the rects are same, 0 otherwise.
- */
-static inline int mdss_rect_cmp(struct mdss_rect *rect1,
-		struct mdss_rect *rect2) {
-	return (rect1->x == rect2->x && rect1->y == rect2->y &&
-		rect1->w == rect2->w && rect1->h == rect2->h);
-}
-
-/*
- * mdss_rect_overlap_check() - compare two rects and check if they overlap
- * @rect1 - rect value to compare
- * @rect2 - rect value to compare
- *
- * Returns true if rects overlap, false otherwise.
- */
-static inline bool mdss_rect_overlap_check(struct mdss_rect *rect1,
-	struct mdss_rect *rect2)
-{
-	u32 rect1_left = rect1->x, rect1_right = rect1->x + rect1->w;
-	u32 rect1_top = rect1->y, rect1_bottom = rect1->y + rect1->h;
-	u32 rect2_left = rect2->x, rect2_right = rect2->x + rect2->w;
-	u32 rect2_top = rect2->y, rect2_bottom = rect2->y + rect2->h;
-
-	if ((rect1_right <= rect2_left) ||
-	    (rect1_left >= rect2_right) ||
-	    (rect1_bottom <= rect2_top) ||
-	    (rect1_top >= rect2_bottom))
-		return true;
-
-	return false;
-}
-
-/*
- * mdss_rect_split() - split roi into two with regards to split-point.
- * @in_roi - input roi, non-split
- * @l_roi  - left roi after split
- * @r_roi  - right roi after split
- *
- * Split input ROI into left and right ROIs with respect to split-point. This
- * is useful during partial update with ping-pong split enabled, where user-land
- * program is aware of only one frame-buffer but physically there are two
- * distinct panels which requires their own ROIs.
- */
-static inline void mdss_rect_split(struct mdss_rect *in_roi,
-	struct mdss_rect *l_roi, struct mdss_rect *r_roi, u32 splitpoint)
-{
-	memset(l_roi, 0x0, sizeof(*l_roi));
-	memset(r_roi, 0x0, sizeof(*r_roi));
-
-	/* left update needed */
-	if (in_roi->x < splitpoint) {
-		*l_roi = *in_roi;
-
-		if (l_roi->x + l_roi->w >= splitpoint)
-			l_roi->w = splitpoint - in_roi->x;
-	}
-
-	/* right update needed */
-	if ((in_roi->x + in_roi->w) > splitpoint) {
-		*r_roi = *in_roi;
-
-		if (in_roi->x < splitpoint) {
-			r_roi->x = 0;
-			r_roi->w = in_roi->x + in_roi->w - splitpoint;
-		} else {
-			r_roi->x = in_roi->x - splitpoint;
-		}
-	}
-
-	pr_debug("left: %d,%d,%d,%d right: %d,%d,%d,%d\n",
-		l_roi->x, l_roi->y, l_roi->w, l_roi->h,
-		r_roi->x, r_roi->y, r_roi->w, r_roi->h);
-}
-
-/*
  * mdss_panel_get_vtotal() - return panel vertical height
  * @pinfo:	Pointer to panel info containing all panel information
  *
@@ -643,33 +636,6 @@ static inline int mdss_panel_get_htotal(struct mdss_panel_info *pinfo, bool
 	return adj_xres + pinfo->lcdc.h_back_porch +
 		pinfo->lcdc.h_front_porch +
 		pinfo->lcdc.h_pulse_width;
-}
-
-/**
- * mdss_mdp_max_fetch_lines: - Number of fetch lines in vertical front porch
- * @pinfo:	Pointer to panel info containing all panel information
- *
- * Returns the number of fetch lines in vertical front porch at which mdp
- * can start fetching the next frame.
- *
- * In some cases, vertical front porch is too high. In such cases limit
- * the mdp fetch lines  as the last 12 lines of vertical front porch.
- */
-static inline int mdss_mdp_max_fetch_lines(struct mdss_panel_info *pinfo)
-{
-	int fetch_lines;
-	int v_total, vfp_start;
-
-	v_total = mdss_panel_get_vtotal(pinfo);
-	vfp_start = (pinfo->lcdc.v_back_porch + pinfo->lcdc.v_pulse_width +
-			pinfo->yres);
-
-	fetch_lines = v_total - vfp_start;
-
-	if (fetch_lines > MDSS_MDP_MAX_FETCH)
-		fetch_lines = MDSS_MDP_MAX_FETCH;
-
-	return fetch_lines;
 }
 
 int mdss_register_panel(struct platform_device *pdev,
@@ -750,6 +716,7 @@ static inline bool mdss_panel_is_power_on_ulp(int panel_power_state)
  * returns NULL on error or if @intf_val is not the configured
  * controller.
  */
+
 struct mdss_panel_cfg *mdss_panel_intf_type(int intf_val);
 
 /**
@@ -770,10 +737,41 @@ int mdss_panel_get_boot_cfg(void);
  * returns true if mdss is ready, else returns false.
  */
 bool mdss_is_ready(void);
+int mdss_rect_cmp(struct mdss_rect *rect1, struct mdss_rect *rect2);
+
+/**
+ * mdss_panel_override_te_params() - overrides TE params to enable SW TE
+ * @pinfo: panel info
+ */
+void mdss_panel_override_te_params(struct mdss_panel_info *pinfo);
+
 #ifdef CONFIG_FB_MSM_MDSS
 int mdss_panel_debugfs_init(struct mdss_panel_info *panel_info);
 void mdss_panel_debugfs_cleanup(struct mdss_panel_info *panel_info);
 void mdss_panel_debugfsinfo_to_panelinfo(struct mdss_panel_info *panel_info);
+
+/*
+ * mdss_panel_info_from_timing() - return panel timing with matching name
+ * @pdata:	pointer to panel data struct containing list of panel timings
+ * @name:	name of the panel timing to be returned
+ *
+ * Looks through list of timings provided in panel data and returns pointer
+ * to panel timing matching it. If none is found, NULL is returned.
+ */
+void mdss_panel_info_from_timing(struct mdss_panel_timing *pt,
+		struct mdss_panel_info *pinfo);
+
+/**
+ * mdss_panel_get_timing_by_name() - return panel timing with matching name
+ * @pdata:	pointer to panel data struct containing list of panel timings
+ * @name:	name of the panel timing to be returned
+ *
+ * Looks through list of timings provided in panel data and returns pointer
+ * to panel timing matching it. If none is found, NULL is returned.
+ */
+struct mdss_panel_timing *mdss_panel_get_timing_by_name(
+		struct mdss_panel_data *pdata,
+		const char *name);
 #else
 static inline int mdss_panel_debugfs_init(
 			struct mdss_panel_info *panel_info) { return 0; };
@@ -781,5 +779,10 @@ static inline void mdss_panel_debugfs_cleanup(
 			struct mdss_panel_info *panel_info) { };
 static inline void mdss_panel_debugfsinfo_to_panelinfo(
 			struct mdss_panel_info *panel_info) { };
+static inline void mdss_panel_info_from_timing(struct mdss_panel_timing *pt,
+		struct mdss_panel_info *pinfo) { };
+static inline struct mdss_panel_timing *mdss_panel_get_timing_by_name(
+		struct mdss_panel_data *pdata,
+		const char *name) { return NULL; };
 #endif
 #endif /* MDSS_PANEL_H */

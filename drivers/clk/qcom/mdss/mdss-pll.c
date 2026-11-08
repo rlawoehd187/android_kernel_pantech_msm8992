@@ -1,4 +1,4 @@
-/* Copyright (c) 2013-2014, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2013-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -45,6 +45,7 @@ int mdss_pll_resource_enable(struct mdss_pll_resources *pll_res, bool enable)
 		return rc;
 	}
 
+	mutex_lock(&pll_res->res_lock);
 	if (enable) {
 		if (pll_res->resource_ref_cnt == 0)
 			changed++;
@@ -67,6 +68,7 @@ int mdss_pll_resource_enable(struct mdss_pll_resources *pll_res, bool enable)
 			pll_res->resource_enable = enable;
 	}
 
+	mutex_unlock(&pll_res->res_lock);
 	return rc;
 }
 
@@ -329,6 +331,11 @@ static int mdss_pll_probe(struct platform_device *pdev)
 		rc = -ENOMEM;
 		goto gdsc_io_error;
 	}
+
+	pll_res->pll_en_90_phase = of_property_read_bool(pdev->dev.of_node,
+						"qcom,mdss-en-pll-90-phase");
+	if (pll_res->pll_en_90_phase)
+		pr_debug("%s: PLL configured to enable 90-Phase", __func__);
 
 	rc = mdss_pll_resource_init(pdev, pll_res);
 	if (rc) {

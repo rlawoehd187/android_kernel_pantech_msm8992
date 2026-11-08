@@ -78,6 +78,10 @@
 
 static int msm_cpp_buffer_ops(struct cpp_device *cpp_dev,
 	uint32_t buff_mgr_ops, struct msm_buf_mngr_info *buff_mgr_info);
+static int msm_cpp_send_frame_to_hardware(struct cpp_device *cpp_dev,
+	struct msm_queue_cmd *frame_qcmd);
+static int msm_cpp_send_command_to_hardware(struct cpp_device *cpp_dev,
+	uint32_t *cmd_msg, uint32_t payload_size);
 
 #if CONFIG_MSM_CPP_DBG
 #define CPP_DBG(fmt, args...) pr_err(fmt, ##args)
@@ -94,6 +98,57 @@ static int msm_cpp_buffer_ops(struct cpp_device *cpp_dev,
 			((to) ? "to" : "from"))
 #define ERR_COPY_FROM_USER() ERR_USER_COPY(0)
 
+/* CPP bus bandwidth definitions */
+static struct msm_bus_vectors msm_cpp_init_vectors[] = {
+	{
+		.src = MSM_BUS_MASTER_CPP,
+		.dst = MSM_BUS_SLAVE_EBI_CH0,
+		.ab  = 0,
+		.ib  = 0,
+	},
+};
+
+static struct msm_bus_vectors msm_cpp_ping_vectors[] = {
+	{
+		.src = MSM_BUS_MASTER_CPP,
+		.dst = MSM_BUS_SLAVE_EBI_CH0,
+		.ab  = 0,
+		.ib  = 0,
+	},
+};
+
+static struct msm_bus_vectors msm_cpp_pong_vectors[] = {
+	{
+		.src = MSM_BUS_MASTER_CPP,
+		.dst = MSM_BUS_SLAVE_EBI_CH0,
+		.ab  = 0,
+		.ib  = 0,
+	},
+};
+
+
+
+static struct msm_bus_paths msm_cpp_bus_client_config[] = {
+	{
+		ARRAY_SIZE(msm_cpp_init_vectors),
+		msm_cpp_init_vectors,
+	},
+	{
+		ARRAY_SIZE(msm_cpp_ping_vectors),
+		msm_cpp_ping_vectors,
+	},
+	{
+		ARRAY_SIZE(msm_cpp_pong_vectors),
+		msm_cpp_pong_vectors,
+	},
+};
+
+static struct msm_bus_scale_pdata msm_cpp_bus_scale_data = {
+	msm_cpp_bus_client_config,
+	ARRAY_SIZE(msm_cpp_bus_client_config),
+	.name = "msm_camera_cpp",
+};
+
 #define msm_dequeue(queue, member) ({	   \
 	unsigned long flags;		  \
 	struct msm_device_queue *__q = (queue);	 \
@@ -109,11 +164,12 @@ static int msm_cpp_buffer_ops(struct cpp_device *cpp_dev,
 	qcmd;			 \
 })
 
-#define MSM_CPP_MAX_TIMEOUT_TRIAL 3
+#define MSM_CPP_MAX_TIMEOUT_TRIAL 0
 
 struct msm_cpp_timer_data_t {
 	struct cpp_device *cpp_dev;
 	struct msm_cpp_frame_info_t *processed_frame[MAX_CPP_PROCESSING_FRAME];
+	spinlock_t processed_frame_lock;
 };
 
 struct msm_cpp_timer_t {
@@ -143,6 +199,56 @@ static int msm_cpp_is_tnr_enabled(struct cpp_device *cpp_dev,
 		}
 	}
 	return 0;
+}
+
+static int msm_cpp_init_bandwidth_mgr(struct cpp_device *cpp_dev)
+{
+	int rc = 0;
+
+	cpp_dev->bus_client =
+		msm_bus_scale_register_client(&msm_cpp_bus_scale_data);
+	if (!cpp_dev->bus_client) {
+		pr_err("Fail to register bus client\n");
+		return -ENOENT;
+	}
+
+	rc = msm_bus_scale_client_update_request(cpp_dev->bus_client, 1);
+	if (rc < 0) {
+		pr_err("Fail bus scale update %d\n", rc);
+		return -EINVAL;
+	}
+	cpp_dev->bus_idx = 1;
+
+	return 0;
+}
+
+static int msm_cpp_update_bandwidth(struct cpp_device *cpp_dev,
+	uint64_t ab, uint64_t ib)
+{
+
+	int rc;
+	struct msm_bus_paths *path;
+	cpp_dev->bus_idx = 3 - cpp_dev->bus_idx;
+	path = &(msm_cpp_bus_scale_data.usecase[cpp_dev->bus_idx]);
+	path->vectors[0].ab = ab;
+	path->vectors[0].ib = ib;
+
+	rc = msm_bus_scale_client_update_request(cpp_dev->bus_client,
+		 cpp_dev->bus_idx);
+	if (rc < 0) {
+		pr_err("Fail bus scale update %d\n", rc);
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
+void msm_cpp_deinit_bandwidth_mgr(struct cpp_device *cpp_dev)
+{
+	if (cpp_dev->bus_client) {
+		msm_bus_scale_unregister_client(cpp_dev->bus_client);
+		cpp_dev->bus_client = 0;
+	}
 }
 
 static void msm_queue_init(struct msm_device_queue *queue, const char *name)
@@ -201,7 +307,8 @@ static int get_clock_index(const char *clk_name)
 }
 
 
-static int msm_cpp_notify_frame_done(struct cpp_device *cpp_dev);
+static int msm_cpp_notify_frame_done(struct cpp_device *cpp_dev,
+	uint8_t put_buf);
 static void cpp_load_fw(struct cpp_device *cpp_dev, char *fw_name_bin);
 static void cpp_timer_callback(unsigned long data);
 
@@ -229,15 +336,22 @@ static void msm_cpp_clear_timer(struct cpp_device *cpp_dev)
 static void msm_cpp_timer_queue_update(struct cpp_device *cpp_dev)
 {
 	uint32_t i;
+	unsigned long flags;
 	CPP_DBG("Frame done qlen %d\n", cpp_dev->processing_q.len);
 	if (cpp_dev->processing_q.len <= 1) {
 		msm_cpp_clear_timer(cpp_dev);
 	} else {
+		spin_lock_irqsave(&cpp_timer.data.processed_frame_lock, flags);
 		for (i = 0; i < cpp_dev->processing_q.len - 1; i++)
 			cpp_timer.data.processed_frame[i] =
 				cpp_timer.data.processed_frame[i + 1];
 		cpp_timer.data.processed_frame[i] = NULL;
 		cpp_dev->timeout_trial_cnt = 0;
+		spin_unlock_irqrestore(&cpp_timer.data.processed_frame_lock,
+			flags);
+
+		mod_timer(&cpp_timer.cpp_timer,
+			jiffies + msecs_to_jiffies(CPP_CMD_TIMEOUT_MS));
 	}
 }
 
@@ -246,7 +360,7 @@ static uint32_t msm_cpp_read(void __iomem *cpp_base)
 	uint32_t tmp, retry = 0;
 	do {
 		tmp = msm_camera_io_r(cpp_base + MSM_CPP_MICRO_FIFO_TX_STAT);
-	} while (((tmp & 0x2) == 0x0) && (retry++ < 10)) ;
+	} while (((tmp & 0x2) == 0x0) && (retry++ < 10));
 	if (retry < 10) {
 		tmp = msm_camera_io_r(cpp_base + MSM_CPP_MICRO_FIFO_TX_DATA);
 		CPP_DBG("Read data: 0%x\n", tmp);
@@ -515,7 +629,7 @@ static void msm_cpp_delete_buff_queue(struct cpp_device *cpp_dev)
 
 	for (i = 0; i < cpp_dev->num_buffq; i++) {
 		if (cpp_dev->buff_queue[i].used == 1) {
-			pr_err("Queue not free sessionid: %d, streamid: %d\n",
+			pr_info("Queue not free sessionid: %d, streamid: %d\n",
 				cpp_dev->buff_queue[i].session_id,
 				cpp_dev->buff_queue[i].stream_id);
 			msm_cpp_dequeue_buff_info_list
@@ -581,7 +695,6 @@ static int cpp_init_mem(struct cpp_device *cpp_dev)
 	int rc = 0;
 
 	kref_init(&cpp_dev->refcount);
-	kref_get(&cpp_dev->refcount);
 	cpp_dev->client = msm_ion_client_create("cpp");
 
 	CPP_DBG("E\n");
@@ -641,35 +754,35 @@ static irqreturn_t msm_cpp_irq(int irq_num, void *data)
 
 		tasklet_schedule(&cpp_dev->cpp_tasklet);
 	} else if (irq_status & 0x7C0) {
-		pr_err("%s: fatal error: 0x%x\n", __func__, irq_status);
-		pr_err("%s: DEBUG_SP: 0x%x\n", __func__,
-			msm_camera_io_r(cpp_dev->cpp_hw_base + 0x40));
-		pr_err("%s: DEBUG_T: 0x%x\n", __func__,
-			msm_camera_io_r(cpp_dev->cpp_hw_base + 0x44));
-		pr_err("%s: DEBUG_N: 0x%x\n", __func__,
-			msm_camera_io_r(cpp_dev->cpp_hw_base + 0x48));
-		pr_err("%s: DEBUG_R: 0x%x\n", __func__,
-			msm_camera_io_r(cpp_dev->cpp_hw_base + 0x4C));
-		pr_err("%s: DEBUG_OPPC: 0x%x\n", __func__,
-			msm_camera_io_r(cpp_dev->cpp_hw_base + 0x50));
-		pr_err("%s: DEBUG_MO: 0x%x\n", __func__,
-			msm_camera_io_r(cpp_dev->cpp_hw_base + 0x54));
-		pr_err("%s: DEBUG_TIMER0: 0x%x\n", __func__,
-			msm_camera_io_r(cpp_dev->cpp_hw_base + 0x60));
-		pr_err("%s: DEBUG_TIMER1: 0x%x\n", __func__,
-			msm_camera_io_r(cpp_dev->cpp_hw_base + 0x64));
-		pr_err("%s: DEBUG_GPI: 0x%x\n", __func__,
-			msm_camera_io_r(cpp_dev->cpp_hw_base + 0x70));
-		pr_err("%s: DEBUG_GPO: 0x%x\n", __func__,
-			msm_camera_io_r(cpp_dev->cpp_hw_base + 0x74));
-		pr_err("%s: DEBUG_T0: 0x%x\n", __func__,
-			msm_camera_io_r(cpp_dev->cpp_hw_base + 0x80));
-		pr_err("%s: DEBUG_R0: 0x%x\n", __func__,
-			msm_camera_io_r(cpp_dev->cpp_hw_base + 0x84));
-		pr_err("%s: DEBUG_T1: 0x%x\n", __func__,
-			msm_camera_io_r(cpp_dev->cpp_hw_base + 0x88));
-		pr_err("%s: DEBUG_R1: 0x%x\n", __func__,
-			msm_camera_io_r(cpp_dev->cpp_hw_base + 0x8C));
+		pr_debug("irq_status: 0x%x\n", irq_status);
+		pr_debug("DEBUG_SP: 0x%x\n",
+			msm_camera_io_r(cpp_dev->base + 0x40));
+		pr_debug("DEBUG_T: 0x%x\n",
+			msm_camera_io_r(cpp_dev->base + 0x44));
+		pr_debug("DEBUG_N: 0x%x\n",
+			msm_camera_io_r(cpp_dev->base + 0x48));
+		pr_debug("DEBUG_R: 0x%x\n",
+			msm_camera_io_r(cpp_dev->base + 0x4C));
+		pr_debug("DEBUG_OPPC: 0x%x\n",
+			msm_camera_io_r(cpp_dev->base + 0x50));
+		pr_debug("DEBUG_MO: 0x%x\n",
+			msm_camera_io_r(cpp_dev->base + 0x54));
+		pr_debug("DEBUG_TIMER0: 0x%x\n",
+			msm_camera_io_r(cpp_dev->base + 0x60));
+		pr_debug("DEBUG_TIMER1: 0x%x\n",
+			msm_camera_io_r(cpp_dev->base + 0x64));
+		pr_debug("DEBUG_GPI: 0x%x\n",
+			msm_camera_io_r(cpp_dev->base + 0x70));
+		pr_debug("DEBUG_GPO: 0x%x\n",
+			msm_camera_io_r(cpp_dev->base + 0x74));
+		pr_debug("DEBUG_T0: 0x%x\n",
+			msm_camera_io_r(cpp_dev->base + 0x80));
+		pr_debug("DEBUG_R0: 0x%x\n",
+			msm_camera_io_r(cpp_dev->base + 0x84));
+		pr_debug("DEBUG_T1: 0x%x\n",
+			msm_camera_io_r(cpp_dev->base + 0x88));
+		pr_debug("DEBUG_R1: 0x%x\n",
+			msm_camera_io_r(cpp_dev->base + 0x8C));
 	}
 	msm_camera_io_w(irq_status, cpp_dev->base + MSM_CPP_MICRO_IRQGEN_CLR);
 	return IRQ_HANDLED;
@@ -714,13 +827,13 @@ void msm_cpp_do_tasklet(unsigned long data)
 					/* delete CPP timer */
 					CPP_DBG("delete timer.\n");
 					msm_cpp_timer_queue_update(cpp_dev);
-					msm_cpp_notify_frame_done(cpp_dev);
+					msm_cpp_notify_frame_done(cpp_dev, 0);
 				} else if (msg_id ==
 					MSM_CPP_MSG_ID_FRAME_NACK) {
 					pr_err("NACK error from hw!!\n");
 					CPP_DBG("delete timer.\n");
 					msm_cpp_timer_queue_update(cpp_dev);
-					msm_cpp_notify_frame_done(cpp_dev);
+					msm_cpp_notify_frame_done(cpp_dev, 0);
 				}
 				i += cmd_len + 2;
 			}
@@ -743,14 +856,15 @@ static void cpp_get_clk_freq_tbl(struct clk *clk, struct cpp_hw_info *hw_info,
 
 	for (i = 0; i < MAX_FREQ_TBL; i++) {
 		freq_tbl_entry = clk->ops->list_rate(clk, i);
-		pr_info("entry=%ld\n", freq_tbl_entry);
+		pr_debug("entry=%ld\n", freq_tbl_entry);
 		if (freq_tbl_entry >= 0) {
 			if (freq_tbl_entry >= min_clk_rate) {
 				hw_info->freq_tbl[idx++] = freq_tbl_entry;
-				pr_err("tbl[%d]=%ld\n", idx-1, freq_tbl_entry);
+				pr_debug("tbl[%d]=%ld\n", idx-1,
+					freq_tbl_entry);
 			}
 		} else {
-			pr_info("freq table returned invalid entry/end %ld\n",
+			pr_debug("freq table returned invalid entry/end %ld\n",
 				freq_tbl_entry);
 			break;
 		}
@@ -774,6 +888,10 @@ static void msm_cpp_calculate_stripe_base(struct cpp_device *cpp_dev)
 		cpp_dev->wr_3_pntr = 14;
 		cpp_dev->rd_ref_pntr = MSM_CPP_INVALID_OFFSET;
 		cpp_dev->wr_ref_pntr = MSM_CPP_INVALID_OFFSET;
+		cpp_dev->wr_0_meta_data_wr_pntr = MSM_CPP_INVALID_OFFSET;
+		cpp_dev->wr_1_meta_data_wr_pntr = MSM_CPP_INVALID_OFFSET;
+		cpp_dev->wr_2_meta_data_wr_pntr = MSM_CPP_INVALID_OFFSET;
+		cpp_dev->wr_3_meta_data_wr_pntr = MSM_CPP_INVALID_OFFSET;
 	} else if ((cpp_dev->fw_version & 0xffff0000) ==
 		CPP_FW_VERSION_1_4_0) {
 		cpp_dev->stripe_base = STRIPE_BASE_FW_1_4_0;
@@ -786,6 +904,10 @@ static void msm_cpp_calculate_stripe_base(struct cpp_device *cpp_dev)
 		cpp_dev->wr_3_pntr = 14;
 		cpp_dev->rd_ref_pntr = MSM_CPP_INVALID_OFFSET;
 		cpp_dev->wr_ref_pntr = MSM_CPP_INVALID_OFFSET;
+		cpp_dev->wr_0_meta_data_wr_pntr = MSM_CPP_INVALID_OFFSET;
+		cpp_dev->wr_1_meta_data_wr_pntr = MSM_CPP_INVALID_OFFSET;
+		cpp_dev->wr_2_meta_data_wr_pntr = MSM_CPP_INVALID_OFFSET;
+		cpp_dev->wr_3_meta_data_wr_pntr = MSM_CPP_INVALID_OFFSET;
 	} else if ((cpp_dev->fw_version & 0xffff0000) ==
 		CPP_FW_VERSION_1_6_0) {
 		cpp_dev->stripe_base = STRIPE_BASE_FW_1_6_0;
@@ -798,6 +920,10 @@ static void msm_cpp_calculate_stripe_base(struct cpp_device *cpp_dev)
 		cpp_dev->wr_3_pntr = 14;
 		cpp_dev->rd_ref_pntr = MSM_CPP_INVALID_OFFSET;
 		cpp_dev->wr_ref_pntr = MSM_CPP_INVALID_OFFSET;
+		cpp_dev->wr_0_meta_data_wr_pntr = MSM_CPP_INVALID_OFFSET;
+		cpp_dev->wr_1_meta_data_wr_pntr = MSM_CPP_INVALID_OFFSET;
+		cpp_dev->wr_2_meta_data_wr_pntr = MSM_CPP_INVALID_OFFSET;
+		cpp_dev->wr_3_meta_data_wr_pntr = MSM_CPP_INVALID_OFFSET;
 	} else if ((cpp_dev->fw_version & 0xffff0000) ==
 		CPP_FW_VERSION_1_8_0) {
 		cpp_dev->stripe_base = STRIPE_BASE_FW_1_8_0;
@@ -810,6 +936,10 @@ static void msm_cpp_calculate_stripe_base(struct cpp_device *cpp_dev)
 		cpp_dev->wr_3_pntr = 23;
 		cpp_dev->rd_ref_pntr = 14;
 		cpp_dev->wr_ref_pntr = 30;
+		cpp_dev->wr_0_meta_data_wr_pntr = MSM_CPP_INVALID_OFFSET;
+		cpp_dev->wr_1_meta_data_wr_pntr = MSM_CPP_INVALID_OFFSET;
+		cpp_dev->wr_2_meta_data_wr_pntr = MSM_CPP_INVALID_OFFSET;
+		cpp_dev->wr_3_meta_data_wr_pntr = MSM_CPP_INVALID_OFFSET;
 	} else if ((cpp_dev->fw_version & 0xffff0000) ==
 		CPP_FW_VERSION_1_10_0) {
 		cpp_dev->stripe_base = STRIPE_BASE_FW_1_10_0;
@@ -822,6 +952,10 @@ static void msm_cpp_calculate_stripe_base(struct cpp_device *cpp_dev)
 		cpp_dev->wr_3_pntr = 26;
 		cpp_dev->rd_ref_pntr = 17;
 		cpp_dev->wr_ref_pntr = 36;
+		cpp_dev->wr_0_meta_data_wr_pntr = 42;
+		cpp_dev->wr_1_meta_data_wr_pntr = 43;
+		cpp_dev->wr_2_meta_data_wr_pntr = 44;
+		cpp_dev->wr_3_meta_data_wr_pntr = 45;
 	}
 	return;
 }
@@ -832,7 +966,11 @@ static int cpp_init_hardware(struct cpp_device *cpp_dev)
 	uint32_t msm_cpp_core_clk_idx;
 	uint32_t msm_micro_iface_idx;
 	uint32_t vbif_version;
-	rc = msm_isp_init_bandwidth_mgr(ISP_CPP);
+
+	if (cpp_dev->bus_master_flag)
+		rc = msm_cpp_init_bandwidth_mgr(cpp_dev);
+	else
+		rc = msm_isp_init_bandwidth_mgr(ISP_CPP);
 	if (rc < 0) {
 		pr_err("%s: Bandwidth registration Failed!\n", __func__);
 		goto bus_scale_register_failed;
@@ -1006,7 +1144,10 @@ clk_failed:
 	regulator_disable(cpp_dev->fs_cpp);
 	regulator_put(cpp_dev->fs_cpp);
 fs_failed:
-	msm_isp_deinit_bandwidth_mgr(ISP_CPP);
+		if (cpp_dev->bus_master_flag)
+			msm_cpp_deinit_bandwidth_mgr(cpp_dev);
+		else
+			msm_isp_deinit_bandwidth_mgr(ISP_CPP);
 bus_scale_register_failed:
 	return rc;
 }
@@ -1035,11 +1176,17 @@ static void cpp_release_hardware(struct cpp_device *cpp_dev)
 	regulator_put(cpp_dev->fs_cpp);
 	cpp_dev->fs_cpp = NULL;
 	if (cpp_dev->stream_cnt > 0) {
-		pr_err("error: stream count active\n");
-		msm_isp_update_bandwidth(ISP_CPP, 0, 0);
+		pr_info("stream count active\n");
+		if (cpp_dev->bus_master_flag)
+			rc = msm_cpp_update_bandwidth(cpp_dev, 0, 0);
+		else
+			rc = msm_isp_update_bandwidth(ISP_CPP, 0, 0);
 	}
 	cpp_dev->stream_cnt = 0;
-	msm_isp_deinit_bandwidth_mgr(ISP_CPP);
+	if (cpp_dev->bus_master_flag)
+		msm_cpp_deinit_bandwidth_mgr(cpp_dev);
+	else
+		msm_isp_deinit_bandwidth_mgr(ISP_CPP);
 }
 
 static void cpp_load_fw(struct cpp_device *cpp_dev, char *fw_name_bin)
@@ -1296,7 +1443,8 @@ static int msm_cpp_buffer_ops(struct cpp_device *cpp_dev,
 	return rc;
 }
 
-static int msm_cpp_notify_frame_done(struct cpp_device *cpp_dev)
+static int msm_cpp_notify_frame_done(struct cpp_device *cpp_dev,
+	uint8_t put_buf)
 {
 	struct v4l2_event v4l2_evt;
 	struct msm_queue_cmd *frame_qcmd = NULL;
@@ -1321,6 +1469,10 @@ static int msm_cpp_notify_frame_done(struct cpp_device *cpp_dev)
 		CPP_DBG("fid %d\n", processed_frame->frame_id);
 		msm_enqueue(&cpp_dev->eventData_q, &event_qcmd->list_eventdata);
 
+		if ((processed_frame->partial_frame_indicator != 0) &&
+			(processed_frame->last_payload == 0))
+			goto NOTIFY_FRAME_DONE;
+
 		if (!processed_frame->output_buffer_info[0].processed_divert &&
 			!processed_frame->output_buffer_info[0].native_buff &&
 			!processed_frame->we_disable) {
@@ -1332,21 +1484,41 @@ static int msm_cpp_notify_frame_done(struct cpp_device *cpp_dev)
 				(processed_frame->identity & 0xFFFF);
 			buff_mgr_info.frame_id = processed_frame->frame_id;
 			buff_mgr_info.timestamp = processed_frame->timestamp;
+			/*
+			 * Update the reserved field (cds information) to buffer
+			 * manager structure so it is propogated back to HAL
+			 */
 			buff_mgr_info.reserved = processed_frame->reserved;
-			buff_mgr_info.index =
-				processed_frame->output_buffer_info[0].index;
-			rc = msm_cpp_buffer_ops(cpp_dev,
-				VIDIOC_MSM_BUF_MNGR_BUF_DONE,
-				&buff_mgr_info);
-			if (rc < 0) {
-				pr_err("error putting buffer\n");
-				rc = -EINVAL;
+			if (processed_frame->batch_info.batch_mode ==
+				BATCH_MODE_VIDEO) {
+				buff_mgr_info.index =
+					processed_frame->batch_info.cont_idx;
+			} else {
+				buff_mgr_info.index = processed_frame->
+					output_buffer_info[0].index;
+			}
+			if (put_buf) {
+				rc = msm_cpp_buffer_ops(cpp_dev,
+					VIDIOC_MSM_BUF_MNGR_PUT_BUF,
+					&buff_mgr_info);
+				if (rc < 0) {
+					pr_err("error putting buffer\n");
+					rc = -EINVAL;
+				}
+			} else {
+				rc = msm_cpp_buffer_ops(cpp_dev,
+					VIDIOC_MSM_BUF_MNGR_BUF_DONE,
+					&buff_mgr_info);
+				if (rc < 0) {
+					pr_err("error putting buffer\n");
+					rc = -EINVAL;
+				}
 			}
 		}
 
 		if (processed_frame->duplicate_output  &&
 			!processed_frame->
-				output_buffer_info[1].processed_divert &&
+				duplicate_buffer_info.processed_divert &&
 			!processed_frame->we_disable) {
 			memset(&buff_mgr_info, 0 ,
 				sizeof(struct msm_buf_mngr_info));
@@ -1357,25 +1529,34 @@ static int msm_cpp_notify_frame_done(struct cpp_device *cpp_dev)
 			buff_mgr_info.frame_id = processed_frame->frame_id;
 			buff_mgr_info.timestamp = processed_frame->timestamp;
 			buff_mgr_info.index =
-				processed_frame->output_buffer_info[1].index;
-			rc = msm_cpp_buffer_ops(cpp_dev,
-				VIDIOC_MSM_BUF_MNGR_BUF_DONE,
+				processed_frame->duplicate_buffer_info.index;
+			/*
+			 * Update the reserved field (cds information) to buffer
+			 * manager structure so it is propogated back to HAL
+			 */
+			buff_mgr_info.reserved = processed_frame->reserved;
+			if (put_buf) {
+				rc = msm_cpp_buffer_ops(cpp_dev,
+					VIDIOC_MSM_BUF_MNGR_PUT_BUF,
 					&buff_mgr_info);
-			if (rc < 0) {
-				pr_err("error putting buffer\n");
-				rc = -EINVAL;
+				if (rc < 0) {
+					pr_err("error putting buffer\n");
+					rc = -EINVAL;
+				}
+			} else {
+				rc = msm_cpp_buffer_ops(cpp_dev,
+					VIDIOC_MSM_BUF_MNGR_BUF_DONE,
+					&buff_mgr_info);
+				if (rc < 0) {
+					pr_err("error putting buffer\n");
+					rc = -EINVAL;
+				}
 			}
 		}
+NOTIFY_FRAME_DONE:
 		v4l2_evt.id = processed_frame->inst_id;
 		v4l2_evt.type = V4L2_EVENT_CPP_FRAME_DONE;
 		v4l2_event_queue(cpp_dev->msm_sd.sd.devnode, &v4l2_evt);
-
-		if (queue->len > 0) {
-			rc = mod_timer(&cpp_timer.cpp_timer,
-				jiffies + msecs_to_jiffies(CPP_CMD_TIMEOUT_MS));
-			if (rc < 0)
-				CPP_DBG("Timer has not expired yet\n");
-		}
 	}
 	return rc;
 }
@@ -1383,15 +1564,28 @@ static int msm_cpp_notify_frame_done(struct cpp_device *cpp_dev)
 #if MSM_CPP_DUMP_FRM_CMD
 static int msm_cpp_dump_frame_cmd(struct msm_cpp_frame_info_t *frame_info)
 {
-	int i;
-	pr_info("-- start: cpp frame cmd for identity=0x%x, frame_id=%d --\n",
-				  frame_info->identity,
-				  frame_info->frame_id);
-	for (i = 0; i < frame_info->msg_len; i++)
-		pr_err("msg[%03d] = 0x%08x\n", i, frame_info->cpp_cmd_msg[i]);
-	pr_info("--   end: cpp frame cmd for identity=0x%x, frame_id=%d --\n",
-				  frame_info->identity,
-				  frame_info->frame_id);
+	int i, i1, i2;
+	struct cpp_device *cpp_dev = cpp_timer.data.cpp_dev;
+	CPP_DBG("-- start: cpp frame cmd for identity=0x%x, frame_id=%d --\n",
+		frame_info->identity, frame_info->frame_id);
+
+	CPP_DBG("msg[%03d] = 0x%08x\n", 0, 0x6);
+	/* send top level and plane level */
+	for (i = 0; i < cpp_dev->stripe_base; i++)
+		CPP_DBG("msg[%03d] = 0x%08x\n", i,
+			frame_info->cpp_cmd_msg[i]);
+	/* send stripes */
+	i1 = cpp_dev->stripe_base +
+		cpp_dev->stripe_size * frame_info->first_stripe_index;
+	i2 = cpp_dev->stripe_size * (frame_info->last_stripe_index -
+		frame_info->first_stripe_index + 1);
+	for (i = 0; i < i2; i++)
+		CPP_DBG("msg[%03d] = 0x%08x\n", i+i1,
+			frame_info->cpp_cmd_msg[i+i1]);
+	/* send trailer */
+	CPP_DBG("msg[%03d] = 0x%08x\n", i+i1, MSM_CPP_MSG_ID_TRAILER);
+	CPP_DBG("--   end: cpp frame cmd for identity=0x%x, frame_id=%d --\n",
+		frame_info->identity, frame_info->frame_id);
 	return 0;
 }
 #else
@@ -1403,27 +1597,31 @@ static int msm_cpp_dump_frame_cmd(struct msm_cpp_frame_info_t *frame_info)
 
 static void msm_cpp_do_timeout_work(struct work_struct *work)
 {
-	int ret;
-	uint32_t i = 0, j = 0;
-	struct msm_cpp_frame_info_t *this_frame = NULL;
+	uint32_t j = 0, i = 0, i1 = 0, i2 = 0;
+	int32_t queue_len = 0;
+	struct msm_device_queue *queue = NULL;
+	struct msm_cpp_frame_info_t *processed_frame[MAX_CPP_PROCESSING_FRAME];
+	struct cpp_device *cpp_dev = cpp_timer.data.cpp_dev;
 
-	pr_err("cpp_timer_callback called. (jiffies=%lu)\n",
+	pr_info("cpp_timer_callback called. (jiffies=%lu)\n",
 		jiffies);
+	mutex_lock(&cpp_dev->mutex);
+
 	if (!work || cpp_timer.data.cpp_dev->state != CPP_STATE_ACTIVE) {
 		pr_err("Invalid work:%p or state:%d\n", work,
 			cpp_timer.data.cpp_dev->state);
-		return;
+		goto end;
 	}
 	if (!atomic_read(&cpp_timer.used)) {
-		pr_err("Delayed trigger, IRQ serviced\n");
-		return;
+		pr_info("Delayed trigger, IRQ serviced\n");
+		goto end;
 	}
 
 	disable_irq(cpp_timer.data.cpp_dev->irq->start);
-	pr_err("Reloading firmware\n");
+	pr_info("Reloading firmware\n");
 	cpp_load_fw(cpp_timer.data.cpp_dev,
 		cpp_timer.data.cpp_dev->fw_name_bin);
-	pr_err("Firmware loading done\n");
+	pr_info("Firmware loading done\n");
 	enable_irq(cpp_timer.data.cpp_dev->irq->start);
 	msm_camera_io_w_mb(0x8, cpp_timer.data.cpp_dev->base +
 		MSM_CPP_MICRO_IRQGEN_MASK);
@@ -1432,37 +1630,73 @@ static void msm_cpp_do_timeout_work(struct work_struct *work)
 		MSM_CPP_MICRO_IRQGEN_CLR);
 
 	if (!atomic_read(&cpp_timer.used)) {
-		pr_err("Delayed trigger, IRQ serviced\n");
-		return;
+		pr_info("Delayed trigger, IRQ serviced\n");
+		goto end;
 	}
 
-	if (cpp_timer.data.cpp_dev->timeout_trial_cnt >=
-		MSM_CPP_MAX_TIMEOUT_TRIAL) {
+	queue = &cpp_timer.data.cpp_dev->processing_q;
+	queue_len = queue->len;
+
+	if (cpp_dev->timeout_trial_cnt >=
+		cpp_dev->max_timeout_trial_cnt) {
 		pr_info("Max trial reached\n");
-		msm_cpp_notify_frame_done(cpp_timer.data.cpp_dev);
-		cpp_timer.data.cpp_dev->timeout_trial_cnt = 0;
-		return;
+		while (queue_len) {
+			msm_cpp_notify_frame_done(cpp_dev, 1);
+			queue_len--;
+		}
+		atomic_set(&cpp_timer.used, 0);
+		for (i = 0; i < MAX_CPP_PROCESSING_FRAME; i++)
+			cpp_timer.data.processed_frame[i] = NULL;
+		cpp_dev->timeout_trial_cnt = 0;
+		goto end;
 	}
 
-	CPP_DBG("Starting timer to fire in %d ms. (jiffies=%lu)\n",
+	atomic_set(&cpp_timer.used, 1);
+	pr_info("Starting timer to fire in %d ms. (jiffies=%lu)\n",
 		CPP_CMD_TIMEOUT_MS, jiffies);
-	ret = mod_timer(&cpp_timer.cpp_timer,
+	mod_timer(&cpp_timer.cpp_timer,
 		jiffies + msecs_to_jiffies(CPP_CMD_TIMEOUT_MS));
-	if (ret)
-		CPP_DBG("Timer has not expired yet\n");
-	for (j = 0; j < MAX_CPP_PROCESSING_FRAME; j++) {
-		this_frame = cpp_timer.data.processed_frame[j];
-		if (this_frame) {
-			pr_err("Rescheduling for identity=0x%x, frame_id=%03d\n",
-				this_frame->identity, this_frame->frame_id);
-			msm_cpp_write(0x6, cpp_timer.data.cpp_dev->base);
-			msm_cpp_dump_frame_cmd(this_frame);
-			for (i = 0; i < this_frame->msg_len; i++)
-				msm_cpp_write(this_frame->cpp_cmd_msg[i],
-					cpp_timer.data.cpp_dev->base);
+
+	for (i = 0; i < MAX_CPP_PROCESSING_FRAME; i++)
+		processed_frame[i] = cpp_timer.data.processed_frame[i];
+
+	for (i = 0; i < queue_len; i++) {
+		pr_info("Rescheduling for identity=0x%x, frame_id=%03d\n",
+			processed_frame[i]->identity,
+			processed_frame[i]->frame_id);
+
+		msm_cpp_write(0x6, cpp_dev->base);
+		/* send top level and plane level */
+		for (j = 0; j < cpp_dev->stripe_base; j++) {
+			if (j % MSM_CPP_RX_FIFO_LEVEL == 0)
+				msm_cpp_poll_rx_empty(cpp_dev->base);
+			msm_cpp_write(processed_frame[i]->cpp_cmd_msg[j],
+				cpp_dev->base);
 		}
+		/* send stripes */
+		i1 = cpp_dev->stripe_base +
+			cpp_dev->stripe_size *
+			processed_frame[i]->first_stripe_index;
+		i2 = cpp_dev->stripe_size *
+			(processed_frame[i]->last_stripe_index -
+			processed_frame[i]->first_stripe_index + 1);
+		for (j = 0; j < i2; j++) {
+			if (j % MSM_CPP_RX_FIFO_LEVEL == 0)
+				msm_cpp_poll_rx_empty(cpp_dev->base);
+			msm_cpp_write(processed_frame[i]->cpp_cmd_msg[j+i1],
+				cpp_dev->base);
+		}
+		/* send trailer */
+		msm_cpp_write(0xabcdefaa, cpp_dev->base);
+		pr_info("After frame:%d write\n", i+1);
 	}
+
 	cpp_timer.data.cpp_dev->timeout_trial_cnt++;
+
+end:
+	mutex_unlock(&cpp_dev->mutex);
+
+	pr_info("exit\n");
 	return;
 }
 
@@ -1477,25 +1711,27 @@ void cpp_timer_callback(unsigned long data)
 static int msm_cpp_send_frame_to_hardware(struct cpp_device *cpp_dev,
 	struct msm_queue_cmd *frame_qcmd)
 {
-	uint32_t i;
+	unsigned long flags;
+	uint32_t i, i1, i2;
 	int32_t rc = -EAGAIN;
 	int ret;
 	struct msm_cpp_frame_info_t *process_frame;
+	uint32_t queue_len = 0;
 
 	if (cpp_dev->processing_q.len < MAX_CPP_PROCESSING_FRAME) {
 		process_frame = frame_qcmd->command;
+		msm_cpp_dump_frame_cmd(process_frame);
+		spin_lock_irqsave(&cpp_timer.data.processed_frame_lock, flags);
 		msm_enqueue(&cpp_dev->processing_q,
 			&frame_qcmd->list_frame);
 		cpp_timer.data.processed_frame[cpp_dev->processing_q.len - 1] =
 			process_frame;
-		if (cpp_dev->processing_q.len == 1) {
+		queue_len = cpp_dev->processing_q.len;
+		spin_unlock_irqrestore(&cpp_timer.data.processed_frame_lock,
+			flags);
+		if (queue_len == 1)
 			atomic_set(&cpp_timer.used, 1);
-			/* install timer for cpp timeout */
-			init_timer(&cpp_timer.cpp_timer);
-			CPP_DBG("Installing cpp_timer\n");
-			setup_timer(&cpp_timer.cpp_timer,
-				cpp_timer_callback, (unsigned long)&cpp_timer);
-		}
+
 		CPP_DBG("Starting timer to fire in %d ms. (jiffies=%lu)\n",
 			CPP_CMD_TIMEOUT_MS, jiffies);
 		ret = mod_timer(&cpp_timer.cpp_timer,
@@ -1504,26 +1740,45 @@ static int msm_cpp_send_frame_to_hardware(struct cpp_device *cpp_dev,
 			CPP_DBG("Timer has not expired yet\n");
 
 		msm_cpp_write(0x6, cpp_dev->base);
-		msm_cpp_dump_frame_cmd(process_frame);
-		msm_cpp_poll_rx_empty(cpp_dev->base);
-		for (i = 0; i < process_frame->msg_len; i++) {
+		/* send top level and plane level */
+		for (i = 0; i < cpp_dev->stripe_base; i++) {
 			if (i % MSM_CPP_RX_FIFO_LEVEL == 0)
 				msm_cpp_poll_rx_empty(cpp_dev->base);
-			if ((induce_error) && (i == 1)) {
-				pr_err("Induce error\n");
-				msm_cpp_write(process_frame->cpp_cmd_msg[i]-1,
-					cpp_dev->base);
-				induce_error--;
-			} else
-				msm_cpp_write(process_frame->cpp_cmd_msg[i],
-					cpp_dev->base);
+			msm_cpp_write(process_frame->cpp_cmd_msg[i],
+				cpp_dev->base);
 		}
+		/* send stripes */
+		i1 = cpp_dev->stripe_base + cpp_dev->stripe_size *
+			process_frame->first_stripe_index;
+		i2 = cpp_dev->stripe_size * (process_frame->last_stripe_index -
+			process_frame->first_stripe_index + 1);
+		for (i = 0; i < i2; i++) {
+			if (i % MSM_CPP_RX_FIFO_LEVEL == 0)
+				msm_cpp_poll_rx_empty(cpp_dev->base);
+			msm_cpp_write(process_frame->cpp_cmd_msg[i+i1],
+				cpp_dev->base);
+		}
+		/* send trailer */
+		msm_cpp_write(MSM_CPP_MSG_ID_TRAILER, cpp_dev->base);
+
 		do_gettimeofday(&(process_frame->in_time));
 		rc = 0;
 	}
 	if (rc < 0)
 		pr_err("process queue full. drop frame\n");
 	return rc;
+}
+
+static int msm_cpp_send_command_to_hardware(struct cpp_device *cpp_dev,
+	uint32_t *cmd_msg, uint32_t payload_size)
+{
+	uint32_t i;
+
+	for (i = 0; i < payload_size; i++) {
+		msm_cpp_write(cmd_msg[i],
+			cpp_dev->base);
+	}
+	return 0;
 }
 
 static int msm_cpp_flush_frames(struct cpp_device *cpp_dev)
@@ -1585,6 +1840,37 @@ no_mem_err:
 	return NULL;
 }
 
+static int msm_cpp_check_buf_type(struct msm_buf_mngr_info *buff_mgr_info,
+	struct msm_cpp_frame_info_t *new_frame)
+{
+	int32_t num_output_bufs = 0;
+	uint32_t i = 0;
+	if (buff_mgr_info->type == MSM_CAMERA_BUF_MNGR_BUF_USER) {
+		new_frame->batch_info.cont_idx =
+			buff_mgr_info->index;
+		num_output_bufs = buff_mgr_info->user_buf.buf_cnt;
+		if (buff_mgr_info->user_buf.buf_cnt <
+			new_frame->batch_info.batch_size) {
+			/* Less bufs than Input buffer */
+			num_output_bufs = buff_mgr_info->user_buf.buf_cnt;
+		} else {
+			/* More or equal bufs as Input buffer */
+			num_output_bufs = new_frame->batch_info.batch_size;
+		}
+		if (num_output_bufs > MSM_OUTPUT_BUF_CNT)
+			return 0;
+		for (i = 0; i < num_output_bufs; i++) {
+			new_frame->output_buffer_info[i].index =
+				buff_mgr_info->user_buf.buf_idx[i];
+		}
+	} else {
+		/* For non-group case use first buf slot */
+		new_frame->output_buffer_info[0].index = buff_mgr_info->index;
+		num_output_bufs = 1;
+	}
+
+	return num_output_bufs;
+}
 static int msm_cpp_cfg_frame(struct cpp_device *cpp_dev,
 	struct msm_cpp_frame_info_t *new_frame)
 {
@@ -1597,11 +1883,15 @@ static int msm_cpp_cfg_frame(struct cpp_device *cpp_dev,
 	uint16_t num_stripes = 0;
 	struct msm_buf_mngr_info buff_mgr_info, dup_buff_mgr_info;
 	int32_t in_fd;
-	int32_t i = 0;
-	int32_t stripe_base = 0;
+	int32_t i = 0, num_output_bufs = 1;
+	uint32_t stripe_base = 0;
 	uint32_t rd_pntr, wr_0_pntr, wr_1_pntr, wr_2_pntr, wr_3_pntr;
+	uint32_t wr_0_meta_data_wr_pntr, wr_1_meta_data_wr_pntr,
+		wr_2_meta_data_wr_pntr, wr_3_meta_data_wr_pntr;
 	uint32_t rd_ref_pntr, wr_ref_pntr, stripe_info_offset, stripe_size;
-	uint8_t tnr_enabled;
+	uint8_t tnr_enabled, ubwc_enabled;
+	enum msm_camera_buf_mngr_buf_type buf_type =
+		MSM_CAMERA_BUF_MNGR_BUF_PLANAR;
 
 	if (!new_frame) {
 		pr_err("%s: Frame is Null\n", __func__);
@@ -1609,16 +1899,72 @@ static int msm_cpp_cfg_frame(struct cpp_device *cpp_dev,
 	}
 	cpp_frame_msg = new_frame->cpp_cmd_msg;
 
+	stripe_base = cpp_dev->stripe_base;
+	stripe_info_offset = cpp_dev->stripe_info_offset;
+	stripe_size = cpp_dev->stripe_size;
+	rd_pntr = cpp_dev->rd_pntr;
+	wr_0_pntr = cpp_dev->wr_0_pntr;
+	wr_1_pntr = cpp_dev->wr_1_pntr;
+	wr_2_pntr = cpp_dev->wr_2_pntr;
+	wr_3_pntr = cpp_dev->wr_3_pntr;
+	rd_ref_pntr = cpp_dev->rd_ref_pntr;
+	wr_ref_pntr = cpp_dev->wr_ref_pntr;
+	wr_0_meta_data_wr_pntr = cpp_dev->wr_0_meta_data_wr_pntr;
+	wr_1_meta_data_wr_pntr = cpp_dev->wr_1_meta_data_wr_pntr;
+	wr_2_meta_data_wr_pntr = cpp_dev->wr_2_meta_data_wr_pntr;
+	wr_3_meta_data_wr_pntr = cpp_dev->wr_3_meta_data_wr_pntr;
+
 	if (cpp_frame_msg == NULL ||
 		(new_frame->msg_len < MSM_CPP_MIN_FRAME_LENGTH)) {
-		pr_err("%s %d Length is not correct or frame message is missing\n",
-			__func__, __LINE__);
+		pr_err("Length is not correct or frame message is missing\n");
 		return -EINVAL;
 	}
 
-	if (cpp_frame_msg[new_frame->msg_len - 1] != MSM_CPP_MSG_ID_TRAILER) {
-		pr_err("%s %d Invalid frame message\n", __func__, __LINE__);
+	if (cpp_frame_msg[new_frame->msg_len - 1] !=
+		MSM_CPP_MSG_ID_TRAILER) {
+		pr_err("Invalid frame message\n");
 		return -EINVAL;
+	}
+
+	/* Stripe index starts at zero */
+	if ((!new_frame->num_strips) ||
+		(new_frame->first_stripe_index >= new_frame->num_strips) ||
+		(new_frame->last_stripe_index  >= new_frame->num_strips) ||
+		(new_frame->first_stripe_index >
+			new_frame->last_stripe_index)) {
+		pr_err("Invalid frame message, #stripes=%d, stripe indices=[%d,%d]\n",
+			new_frame->num_strips,
+			new_frame->first_stripe_index,
+			new_frame->last_stripe_index);
+		return -EINVAL;
+	}
+
+	if (!stripe_size) {
+		pr_err("Invalid frame message, invalid stripe_size (%d)!\n",
+			stripe_size);
+		return -EINVAL;
+	}
+
+	if ((stripe_base == UINT_MAX) ||
+		(new_frame->num_strips >
+			(UINT_MAX - 1 - stripe_base) / stripe_size)) {
+		pr_err("Invalid frame message, num_strips %d is large\n",
+			new_frame->num_strips);
+		return -EINVAL;
+	}
+
+	if ((stripe_base + new_frame->num_strips * stripe_size + 1) !=
+		new_frame->msg_len) {
+		pr_err("Invalid frame message,len=%d,expected=%d\n",
+			new_frame->msg_len,
+			(stripe_base +
+			new_frame->num_strips * stripe_size + 1));
+		return -EINVAL;
+	}
+
+	if (cpp_dev->iommu_state != CPP_IOMMU_STATE_ATTACHED) {
+		pr_info("IOMMU is not attached\n");
+		return -EAGAIN;
 	}
 
 	in_phyaddr = msm_cpp_fetch_buffer_info(cpp_dev,
@@ -1632,13 +1978,19 @@ static int msm_cpp_cfg_frame(struct cpp_device *cpp_dev,
 	}
 
 	if (new_frame->we_disable == 0) {
-		if (new_frame->output_buffer_info[0].native_buff == 0) {
+		if ((new_frame->output_buffer_info[0].native_buff == 0) &&
+			(new_frame->first_payload)) {
 			memset(&buff_mgr_info, 0,
 				sizeof(struct msm_buf_mngr_info));
+			if (new_frame->batch_info.batch_mode ==
+				BATCH_MODE_VIDEO)
+				buf_type = MSM_CAMERA_BUF_MNGR_BUF_USER;
+
 			buff_mgr_info.session_id =
 				((new_frame->identity >> 16) & 0xFFFF);
 			buff_mgr_info.stream_id =
 				(new_frame->identity & 0xFFFF);
+			buff_mgr_info.type = buf_type;
 			rc = msm_cpp_buffer_ops(cpp_dev,
 				VIDIOC_MSM_BUF_MNGR_GET_BUF,
 				&buff_mgr_info);
@@ -1648,8 +2000,15 @@ static int msm_cpp_cfg_frame(struct cpp_device *cpp_dev,
 					__func__, rc);
 				goto frame_msg_err;
 			}
-			new_frame->output_buffer_info[0].index =
-				buff_mgr_info.index;
+			num_output_bufs =
+				msm_cpp_check_buf_type(&buff_mgr_info,
+					new_frame);
+			if (!num_output_bufs) {
+				pr_err("%s: error getting buffer %d\n",
+					__func__, num_output_bufs);
+				rc = -EINVAL;
+				goto phyaddr_err;
+			}
 		}
 
 		out_phyaddr0 = msm_cpp_fetch_buffer_info(cpp_dev,
@@ -1670,13 +2029,15 @@ static int msm_cpp_cfg_frame(struct cpp_device *cpp_dev,
 	if (new_frame->duplicate_output) {
 		CPP_DBG("duplication enabled, dup_id=0x%x",
 			new_frame->duplicate_identity);
-		memset(&new_frame->output_buffer_info[1], 0,
+		memset(&new_frame->duplicate_buffer_info, 0,
 			sizeof(struct msm_cpp_buffer_info_t));
 		memset(&dup_buff_mgr_info, 0, sizeof(struct msm_buf_mngr_info));
 		dup_buff_mgr_info.session_id =
 			((new_frame->duplicate_identity >> 16) & 0xFFFF);
 		dup_buff_mgr_info.stream_id =
 			(new_frame->duplicate_identity & 0xFFFF);
+		dup_buff_mgr_info.type =
+			MSM_CAMERA_BUF_MNGR_BUF_PLANAR;
 		rc = msm_cpp_buffer_ops(cpp_dev, VIDIOC_MSM_BUF_MNGR_GET_BUF,
 			&dup_buff_mgr_info);
 		if (rc < 0) {
@@ -1685,13 +2046,13 @@ static int msm_cpp_cfg_frame(struct cpp_device *cpp_dev,
 				__func__, rc);
 			goto phyaddr_err;
 		}
-		new_frame->output_buffer_info[1].index =
+		new_frame->duplicate_buffer_info.index =
 			dup_buff_mgr_info.index;
 		out_phyaddr1 = msm_cpp_fetch_buffer_info(cpp_dev,
-			&new_frame->output_buffer_info[1],
+			&new_frame->duplicate_buffer_info,
 			((new_frame->duplicate_identity >> 16) & 0xFFFF),
 			(new_frame->duplicate_identity & 0xFFFF),
-			&new_frame->output_buffer_info[1].fd);
+			&new_frame->duplicate_buffer_info.fd);
 		if (!out_phyaddr1) {
 			pr_err("error gettting output physical address\n");
 			rc = -EINVAL;
@@ -1704,18 +2065,57 @@ static int msm_cpp_cfg_frame(struct cpp_device *cpp_dev,
 		CPP_DBG("out_phyaddr1= %08x\n", (uint32_t)out_phyaddr1);
 	}
 
-	stripe_base = cpp_dev->stripe_base;
-	stripe_info_offset = cpp_dev->stripe_info_offset;
-	stripe_size = cpp_dev->stripe_size;
-	rd_pntr = cpp_dev->rd_pntr;
-	wr_0_pntr = cpp_dev->wr_0_pntr;
-	wr_1_pntr = cpp_dev->wr_1_pntr;
-	wr_2_pntr = cpp_dev->wr_2_pntr;
-	wr_3_pntr = cpp_dev->wr_3_pntr;
-	rd_ref_pntr = cpp_dev->rd_ref_pntr;
-	wr_ref_pntr = cpp_dev->wr_ref_pntr;
+	if ((BATCH_MODE_VIDEO == new_frame->batch_info.batch_mode) &&
+		(new_frame->batch_info.batch_size > 1)) {
+		/*create and send Set Group Buffer with Duplicate command*/
+		uint32_t set_group_buffer_w_duplication[73];
+		uint32_t *ptr = &set_group_buffer_w_duplication[0];
+		unsigned long out_phyaddr, out_phyaddr_new, distance;
+
+		memset(ptr, 0, sizeof(set_group_buffer_w_duplication));
+		*ptr++ = MSM_CPP_CMD_GROUP_BUFFER;
+		*ptr++ = MSM_CPP_MSG_ID_CMD;
+		*ptr++ = MSM_CPP_GROUP_CMD_LEN;
+		*ptr++ = MSM_CPP_CMD_GROUP_BUFFER;
+		*ptr++ = 0;
+		out_phyaddr = out_phyaddr0;
+		for (i = 1; i < num_output_bufs; i++) {
+			out_phyaddr_new = msm_cpp_fetch_buffer_info(cpp_dev,
+				&new_frame->output_buffer_info[i],
+				((new_frame->identity >> 16) & 0xFFFF),
+				(new_frame->identity & 0xFFFF),
+				&new_frame->output_buffer_info[i].fd);
+			if (!out_phyaddr_new) {
+				pr_err("%s: error getting o/p phy addr\n",
+					__func__);
+				rc = -EINVAL;
+				goto phyaddr_err;
+			}
+			distance = out_phyaddr_new - out_phyaddr;
+			out_phyaddr = out_phyaddr_new;
+			*ptr++ = distance;
+			*ptr++ = distance;
+			*ptr++ = distance;
+		}
+		if (new_frame->duplicate_output)
+			set_group_buffer_w_duplication[38] =
+				1 << new_frame->batch_info.pick_preview_idx;
+		else
+			set_group_buffer_w_duplication[38] = 0;
+
+		set_group_buffer_w_duplication[72] = MSM_CPP_MSG_ID_TRAILER;
+		rc = msm_cpp_send_command_to_hardware(cpp_dev,
+			&set_group_buffer_w_duplication[0], 73);
+		if (rc < 0) {
+			pr_err("%s: Send Command Error\n", __func__);
+			rc = -EINVAL;
+			goto phyaddr_err;
+		}
+	}
 
 	tnr_enabled = msm_cpp_is_tnr_enabled(cpp_dev, cpp_frame_msg);
+	pr_debug("%s: feature_mask 0x%x\n", __func__, new_frame->feature_mask);
+	ubwc_enabled = ((new_frame->feature_mask & 0x20) >> 5);
 	if (tnr_enabled) {
 		tnr_scratch_buffer0 = msm_cpp_fetch_buffer_info(cpp_dev,
 			&new_frame->tnr_scratch_buffer_info[0],
@@ -1743,20 +2143,7 @@ static int msm_cpp_cfg_frame(struct cpp_device *cpp_dev,
 		tnr_scratch_buffer1 = 0;
 	}
 
-	num_stripes = ((cpp_frame_msg[stripe_info_offset] >> 20) & 0x3FF) +
-		((cpp_frame_msg[stripe_info_offset] >> 10) & 0x3FF) +
-		(cpp_frame_msg[stripe_info_offset] & 0x3FF);
-
-	if ((stripe_base + num_stripes * stripe_size + 1) !=
-		new_frame->msg_len) {
-		pr_err("Invalid frame message,len=%d,expected=%d\n",
-			new_frame->msg_len,
-			(stripe_base + num_stripes * stripe_size + 1));
-		rc = -EINVAL;
-		goto phyaddr_err;
-	}
-
-	for (i = 0; i < num_stripes; i++) {
+	for (i = 0; i < new_frame->num_strips; i++) {
 		cpp_frame_msg[stripe_base + rd_pntr + i * stripe_size] +=
 			(uint32_t) in_phyaddr;
 		cpp_frame_msg[stripe_base + wr_0_pntr + i * stripe_size] +=
@@ -1775,10 +2162,27 @@ static int msm_cpp_cfg_frame(struct cpp_device *cpp_dev,
 				i * stripe_size] +=
 				(uint32_t)tnr_scratch_buffer1;
 		}
+		if (ubwc_enabled) {
+			cpp_frame_msg[stripe_base + wr_0_meta_data_wr_pntr +
+				i * stripe_size] += (uint32_t) out_phyaddr0;
+			cpp_frame_msg[stripe_base + wr_1_meta_data_wr_pntr +
+				i * stripe_size] += (uint32_t) out_phyaddr1;
+			cpp_frame_msg[stripe_base + wr_2_meta_data_wr_pntr +
+				i * stripe_size] += (uint32_t) out_phyaddr0;
+			cpp_frame_msg[stripe_base + wr_3_meta_data_wr_pntr +
+				i * stripe_size] += (uint32_t) out_phyaddr1;
+
+		}
 	}
 
-	if (tnr_enabled)
-		cpp_frame_msg[10] = out_phyaddr0 - in_phyaddr;
+	if (tnr_enabled) {
+		cpp_frame_msg[10] = tnr_scratch_buffer1 -
+			tnr_scratch_buffer0;
+	}
+
+	num_stripes = new_frame->last_stripe_index -
+		new_frame->first_stripe_index + 1;
+	cpp_frame_msg[1] = stripe_base - 2 + num_stripes * stripe_size;
 
 	frame_qcmd = kzalloc(sizeof(struct msm_queue_cmd), GFP_KERNEL);
 	if (!frame_qcmd) {
@@ -1813,9 +2217,12 @@ static int msm_cpp_cfg(struct cpp_device *cpp_dev,
 	struct msm_camera_v4l2_ioctl_t *ioctl_ptr)
 {
 	struct msm_cpp_frame_info_t *frame = NULL;
-	struct msm_cpp_frame_info_t *u_frame_info =
-	  (struct msm_cpp_frame_info_t *)ioctl_ptr->ioctl_ptr;
+	struct msm_cpp_frame_info_t k_frame_info;
 	int32_t rc = 0;
+	if (copy_from_user(&k_frame_info,
+			(void __user *)ioctl_ptr->ioctl_ptr,
+			sizeof(k_frame_info)))
+		return -EFAULT;
 
 	frame = msm_cpp_get_frame(ioctl_ptr);
 	if (!frame) {
@@ -1827,7 +2234,7 @@ static int msm_cpp_cfg(struct cpp_device *cpp_dev,
 
 	ioctl_ptr->trans_code = rc;
 
-	if (copy_to_user((void __user *)u_frame_info->status, &rc,
+	if (copy_to_user((void __user *)k_frame_info.status, &rc,
 		sizeof(int32_t)))
 		pr_err("error cannot copy error\n");
 
@@ -1859,6 +2266,11 @@ static int msm_cpp_copy_from_ioctl_ptr(void *dst_ptr,
 	struct msm_camera_v4l2_ioctl_t *ioctl_ptr)
 {
 	int ret;
+	if ((ioctl_ptr->ioctl_ptr == NULL) || (ioctl_ptr->len == 0)) {
+		pr_err("%s: Wrong ioctl_ptr %p / len %zu\n", __func__,
+			ioctl_ptr, ioctl_ptr->len);
+		return -EINVAL;
+	}
 
 	/* For compat task, source ptr is in kernel space */
 	if (is_compat_task()) {
@@ -1877,6 +2289,11 @@ static int msm_cpp_copy_from_ioctl_ptr(void *dst_ptr,
 	struct msm_camera_v4l2_ioctl_t *ioctl_ptr)
 {
 	int ret;
+	if ((ioctl_ptr->ioctl_ptr == NULL) || (ioctl_ptr->len == 0)) {
+		pr_err("%s: Wrong ioctl_ptr %p / len %zu\n", __func__,
+			ioctl_ptr, ioctl_ptr->len);
+		return -EINVAL;
+	}
 
 	ret = copy_from_user(dst_ptr,
 		(void __user *)ioctl_ptr->ioctl_ptr, ioctl_ptr->len);
@@ -1887,18 +2304,57 @@ static int msm_cpp_copy_from_ioctl_ptr(void *dst_ptr,
 }
 #endif
 
+
+static int msm_cpp_validate_ioctl_input(unsigned int cmd, void *arg,
+	struct msm_camera_v4l2_ioctl_t **ioctl_ptr)
+{
+	switch (cmd) {
+	case MSM_SD_SHUTDOWN:
+	case VIDIOC_MSM_CPP_IOMMU_ATTACH:
+	case VIDIOC_MSM_CPP_IOMMU_DETACH:
+		break;
+	default: {
+		if (ioctl_ptr == NULL) {
+			pr_err("Wrong ioctl_ptr for cmd %u\n", cmd);
+			return -EINVAL;
+		}
+
+		*ioctl_ptr = arg;
+		if (((*ioctl_ptr) == NULL) ||
+			((*ioctl_ptr)->ioctl_ptr == NULL) ||
+			((*ioctl_ptr)->len == 0)) {
+			pr_err("Error invalid ioctl argument cmd %u", cmd);
+			return -EINVAL;
+		}
+		break;
+	}
+	}
+	return 0;
+}
+
 long msm_cpp_subdev_ioctl(struct v4l2_subdev *sd,
 			unsigned int cmd, void *arg)
 {
 	struct cpp_device *cpp_dev = NULL;
-	struct msm_camera_v4l2_ioctl_t *ioctl_ptr = arg;
+	struct msm_camera_v4l2_ioctl_t *ioctl_ptr = NULL;
 	int rc = 0;
 
-	if ((sd == NULL) || (ioctl_ptr == NULL) ||
-		(ioctl_ptr->ioctl_ptr == NULL)) {
-		pr_err("Wrong ioctl_ptr %p, sd %p\n", ioctl_ptr, sd);
+	if (sd == NULL) {
+		pr_err("sd %pK\n", sd);
 		return -EINVAL;
 	}
+
+	if (_IOC_DIR(cmd) == _IOC_NONE) {
+		pr_err("Invalid ioctl/subdev cmd %u", cmd);
+		return -EINVAL;
+	}
+
+	rc = msm_cpp_validate_ioctl_input(cmd, arg, &ioctl_ptr);
+	if (rc != 0) {
+		pr_err("input validation failed\n");
+		return rc;
+	}
+
 	cpp_dev = v4l2_get_subdevdata(sd);
 	if (cpp_dev == NULL) {
 		pr_err("cpp_dev is null\n");
@@ -1941,6 +2397,8 @@ long msm_cpp_subdev_ioctl(struct v4l2_subdev *sd,
 			}
 			if (ioctl_ptr->ioctl_ptr == NULL) {
 				pr_err("ioctl_ptr->ioctl_ptr=NULL\n");
+				kfree(cpp_dev->fw_name_bin);
+				cpp_dev->fw_name_bin = NULL;
 				mutex_unlock(&cpp_dev->mutex);
 				return -EINVAL;
 			}
@@ -2045,6 +2503,9 @@ long msm_cpp_subdev_ioctl(struct v4l2_subdev *sd,
 				k_stream_buff_info.identity & 0xFFFF);
 
 		if (buff_queue_info == NULL) {
+			if (cmd == VIDIOC_MSM_CPP_DELETE_STREAM_BUFF)
+				goto STREAM_BUFF_END;
+
 			rc = msm_cpp_add_buff_queue_entry(cpp_dev,
 				((k_stream_buff_info.identity >> 16) & 0xFFFF),
 				(k_stream_buff_info.identity & 0xFFFF));
@@ -2096,8 +2557,7 @@ STREAM_BUFF_END:
 		uint32_t identity;
 		struct msm_cpp_buff_queue_info_t *buff_queue_info;
 		CPP_DBG("VIDIOC_MSM_CPP_DEQUEUE_STREAM_BUFF_INFO\n");
-		if ((ioctl_ptr->len == 0) ||
-		    (ioctl_ptr->len > sizeof(uint32_t))) {
+		if (ioctl_ptr->len != sizeof(uint32_t)) {
 			mutex_unlock(&cpp_dev->mutex);
 			return -EINVAL;
 		}
@@ -2126,7 +2586,12 @@ STREAM_BUFF_END:
 			cpp_dev->stream_cnt--;
 			pr_info("stream_cnt:%d\n", cpp_dev->stream_cnt);
 			if (cpp_dev->stream_cnt == 0) {
-				rc = msm_isp_update_bandwidth(ISP_CPP, 0, 0);
+				if (cpp_dev->bus_master_flag)
+					rc = msm_cpp_update_bandwidth(cpp_dev,
+						 0, 0);
+				else
+					rc = msm_isp_update_bandwidth(ISP_CPP,
+						 0, 0);
 				if (rc < 0)
 					pr_err("Bandwidth Reset Failed!\n");
 				cpp_dev->state = CPP_STATE_IDLE;
@@ -2156,6 +2621,9 @@ STREAM_BUFF_END:
 				process_frame,
 				sizeof(struct msm_cpp_frame_info_t))) {
 					mutex_unlock(&cpp_dev->mutex);
+					kfree(process_frame->cpp_cmd_msg);
+					kfree(process_frame);
+					kfree(event_qcmd);
 					return -EINVAL;
 		}
 
@@ -2200,13 +2668,23 @@ STREAM_BUFF_END:
 				pr_err(" Fail to get clock index\n");
 				return -EINVAL;
 			}
-			rc = msm_isp_update_bandwidth(ISP_CPP,
-				clock_settings.avg,
-				clock_settings.inst);
 
+			if (cpp_dev->bus_master_flag)
+				rc = msm_cpp_update_bandwidth(cpp_dev,
+					clock_settings.avg,
+					clock_settings.inst);
+			else
+				rc = msm_isp_update_bandwidth(ISP_CPP,
+					clock_settings.avg,
+					clock_settings.inst);
 			if (rc < 0) {
 				pr_err("Bandwidth Set Failed!\n");
-				msm_isp_update_bandwidth(ISP_CPP, 0, 0);
+				if (cpp_dev->bus_master_flag)
+					rc = msm_cpp_update_bandwidth(cpp_dev,
+						0, 0);
+				else
+					rc = msm_isp_update_bandwidth(ISP_CPP,
+						0, 0);
 				mutex_unlock(&cpp_dev->mutex);
 				return -EINVAL;
 			}
@@ -2239,6 +2717,10 @@ STREAM_BUFF_END:
 		struct msm_pproc_queue_buf_info queue_buf_info;
 		CPP_DBG("VIDIOC_MSM_CPP_QUEUE_BUF\n");
 
+		if (ioctl_ptr->len != sizeof(struct msm_pproc_queue_buf_info)) {
+			pr_err("%s: Not valid ioctl_ptr->len\n", __func__);
+			return -EINVAL;
+		}
 		rc = msm_cpp_copy_from_ioctl_ptr(&queue_buf_info, ioctl_ptr);
 		if (rc) {
 			ERR_COPY_FROM_USER();
@@ -2264,22 +2746,30 @@ STREAM_BUFF_END:
 	case VIDIOC_MSM_CPP_POP_STREAM_BUFFER: {
 		struct msm_buf_mngr_info buff_mgr_info;
 		struct msm_cpp_frame_info_t frame_info;
-		rc = (copy_from_user(&frame_info,
-			(void __user *)ioctl_ptr->ioctl_ptr,
-			sizeof(struct msm_cpp_frame_info_t)) ? -EFAULT : 0);
+		if (ioctl_ptr->ioctl_ptr == NULL ||
+			(ioctl_ptr->len !=
+			sizeof(struct msm_cpp_frame_info_t))) {
+			rc = -EINVAL;
+			break;
+		}
+
+		rc = msm_cpp_copy_from_ioctl_ptr(&frame_info, ioctl_ptr);
 		if (rc) {
 			ERR_COPY_FROM_USER();
 			break;
 		}
+
 		memset(&buff_mgr_info, 0, sizeof(struct msm_buf_mngr_info));
 		buff_mgr_info.session_id =
 			((frame_info.identity >> 16) & 0xFFFF);
 		buff_mgr_info.stream_id = (frame_info.identity & 0xFFFF);
+		buff_mgr_info.type =
+			MSM_CAMERA_BUF_MNGR_BUF_PLANAR;
 		rc = msm_cpp_buffer_ops(cpp_dev, VIDIOC_MSM_BUF_MNGR_GET_BUF,
 			&buff_mgr_info);
 		if (rc < 0) {
 			rc = -EAGAIN;
-			pr_err("error getting buffer rc:%d\n", rc);
+			pr_err_ratelimited("error getting buffer rc:%d\n", rc);
 			break;
 		}
 		buff_mgr_info.frame_id = frame_info.frame_id;
@@ -2302,6 +2792,7 @@ STREAM_BUFF_END:
 				pr_err("%s:%dError iommu_attach_device failed\n",
 					__func__, __LINE__);
 				rc = -EINVAL;
+				break;
 			}
 			cpp_dev->iommu_state = CPP_IOMMU_STATE_ATTACHED;
 		} else {
@@ -2312,13 +2803,21 @@ STREAM_BUFF_END:
 		break;
 	}
 	case VIDIOC_MSM_CPP_IOMMU_DETACH: {
-		if (cpp_dev->iommu_state == CPP_IOMMU_STATE_ATTACHED) {
+		if ((cpp_dev->iommu_state == CPP_IOMMU_STATE_ATTACHED) &&
+			(cpp_dev->stream_cnt == 0)) {
 			iommu_detach_device(cpp_dev->domain,
 				cpp_dev->iommu_ctx);
+			if (rc < 0) {
+				pr_err("%s:%dError iommu detach failed\n",
+					__func__, __LINE__);
+				rc = -EINVAL;
+				break;
+			}
 			cpp_dev->iommu_state = CPP_IOMMU_STATE_DETACHED;
 		} else {
 			pr_err("%s:%d IOMMMU attach triggered in invalid state\n",
 				__func__, __LINE__);
+			rc = -EINVAL;
 		}
 		break;
 	}
@@ -2426,7 +2925,7 @@ static struct msm_cpp_frame_info_t *get_64bit_cpp_frame_from_compat(
 	struct msm_cpp_frame_info_t *new_frame = NULL;
 	uint32_t *cpp_frame_msg;
 	void *cpp_cmd_msg_64bit;
-	int32_t rc;
+	int32_t rc, i;
 
 	new_frame32 = kzalloc(sizeof(struct msm_cpp_frame_info32_t),
 		GFP_KERNEL);
@@ -2479,6 +2978,20 @@ static struct msm_cpp_frame_info_t *get_64bit_cpp_frame_from_compat(
 		new_frame32->output_buffer_info[0];
 	new_frame->output_buffer_info[1] =
 		new_frame32->output_buffer_info[1];
+	new_frame->output_buffer_info[2] =
+		new_frame32->output_buffer_info[2];
+	new_frame->output_buffer_info[3] =
+		new_frame32->output_buffer_info[3];
+	new_frame->output_buffer_info[4] =
+		new_frame32->output_buffer_info[4];
+	new_frame->output_buffer_info[5] =
+		new_frame32->output_buffer_info[5];
+	new_frame->output_buffer_info[6] =
+		new_frame32->output_buffer_info[6];
+	new_frame->output_buffer_info[7] =
+		new_frame32->output_buffer_info[7];
+	new_frame->duplicate_buffer_info =
+		new_frame32->duplicate_buffer_info;
 	new_frame->tnr_scratch_buffer_info[0] =
 		new_frame32->tnr_scratch_buffer_info[0];
 	new_frame->tnr_scratch_buffer_info[1] =
@@ -2486,7 +2999,28 @@ static struct msm_cpp_frame_info_t *get_64bit_cpp_frame_from_compat(
 	new_frame->duplicate_output = new_frame32->duplicate_output;
 	new_frame->we_disable = new_frame32->we_disable;
 	new_frame->duplicate_identity = new_frame32->duplicate_identity;
+	new_frame->feature_mask = new_frame32->feature_mask;
 	new_frame->reserved = new_frame32->reserved;
+	new_frame->partial_frame_indicator =
+		new_frame32->partial_frame_indicator;
+	new_frame->first_payload = new_frame32->first_payload;
+	new_frame->last_payload = new_frame32->last_payload;
+	new_frame->first_stripe_index = new_frame32->first_stripe_index;
+	new_frame->last_stripe_index = new_frame32->last_stripe_index;
+	new_frame->stripe_info_offset =
+		new_frame32->stripe_info_offset;
+	new_frame->stripe_info = new_frame32->stripe_info;
+	new_frame->batch_info.batch_mode =
+		new_frame32->batch_info.batch_mode;
+	new_frame->batch_info.batch_size =
+		new_frame32->batch_info.batch_size;
+	new_frame->batch_info.cont_idx =
+		new_frame32->batch_info.cont_idx;
+	for (i = 0; i < MAX_PLANES; i++)
+		new_frame->batch_info.intra_plane_offset[i] =
+			new_frame32->batch_info.intra_plane_offset[i];
+	new_frame->batch_info.pick_preview_idx =
+		new_frame32->batch_info.pick_preview_idx;
 
 	/* Convert the 32 bit pointer to 64 bit pointer */
 	new_frame->cookie = compat_ptr(new_frame32->cookie);
@@ -2495,14 +3029,14 @@ static struct msm_cpp_frame_info_t *get_64bit_cpp_frame_from_compat(
 		(new_frame->msg_len > MSM_CPP_MAX_FRAME_LENGTH)) {
 		pr_err("%s:%d: Invalid frame len:%d\n", __func__,
 			__LINE__, new_frame->msg_len);
-		goto strip_err;
+		goto frame_err;
 	}
 
 	cpp_frame_msg = kzalloc(sizeof(uint32_t)*new_frame->msg_len,
 		GFP_KERNEL);
 	if (!cpp_frame_msg) {
 		pr_err("Insufficient memory\n");
-		goto strip_err;
+		goto frame_err;
 	}
 
 	rc = (copy_from_user(cpp_frame_msg,
@@ -2519,8 +3053,6 @@ static struct msm_cpp_frame_info_t *get_64bit_cpp_frame_from_compat(
 
 frame_msg_err:
 	kfree(cpp_frame_msg);
-strip_err:
-	kfree(new_frame->strip_info);
 frame_err:
 	kfree(new_frame);
 no_mem:
@@ -2532,6 +3064,8 @@ no_mem32:
 static void get_compat_frame_from_64bit(struct msm_cpp_frame_info_t *frame,
 	struct msm_cpp_frame_info32_t *k32_frame)
 {
+	int32_t i;
+
 	k32_frame->frame_id = frame->frame_id;
 	k32_frame->inst_id = frame->inst_id;
 	k32_frame->client_id = frame->client_id;
@@ -2556,11 +3090,34 @@ static void get_compat_frame_from_64bit(struct msm_cpp_frame_info_t *frame,
 	k32_frame->input_buffer_info = frame->input_buffer_info;
 	k32_frame->output_buffer_info[0] = frame->output_buffer_info[0];
 	k32_frame->output_buffer_info[1] = frame->output_buffer_info[1];
+	k32_frame->output_buffer_info[2] = frame->output_buffer_info[2];
+	k32_frame->output_buffer_info[3] = frame->output_buffer_info[3];
+	k32_frame->output_buffer_info[4] = frame->output_buffer_info[4];
+	k32_frame->output_buffer_info[5] = frame->output_buffer_info[5];
+	k32_frame->output_buffer_info[6] = frame->output_buffer_info[6];
+	k32_frame->output_buffer_info[7] = frame->output_buffer_info[7];
+	k32_frame->duplicate_buffer_info = frame->duplicate_buffer_info;
 	k32_frame->duplicate_output = frame->duplicate_output;
 	k32_frame->we_disable = frame->we_disable;
 	k32_frame->duplicate_identity = frame->duplicate_identity;
+	k32_frame->feature_mask = frame->feature_mask;
 	k32_frame->reserved = frame->reserved;
 	k32_frame->cookie = ptr_to_compat(frame->cookie);
+	k32_frame->partial_frame_indicator = frame->partial_frame_indicator;
+	k32_frame->first_payload = frame->first_payload;
+	k32_frame->last_payload = frame->last_payload;
+	k32_frame->first_stripe_index = frame->first_stripe_index;
+	k32_frame->last_stripe_index = frame->last_stripe_index;
+	k32_frame->stripe_info_offset = frame->stripe_info_offset;
+	k32_frame->stripe_info = frame->stripe_info;
+	k32_frame->batch_info.batch_mode = frame->batch_info.batch_mode;
+	k32_frame->batch_info.batch_size = frame->batch_info.batch_size;
+	k32_frame->batch_info.cont_idx = frame->batch_info.cont_idx;
+	for (i = 0; i < MAX_PLANES; i++)
+		k32_frame->batch_info.intra_plane_offset[i] =
+			frame->batch_info.intra_plane_offset[i];
+	k32_frame->batch_info.pick_preview_idx =
+		frame->batch_info.pick_preview_idx;
 }
 
 static long msm_cpp_subdev_fops_compat_ioctl(struct file *file,
@@ -2575,8 +3132,12 @@ static long msm_cpp_subdev_fops_compat_ioctl(struct file *file,
 	struct msm_camera_v4l2_ioctl32_t up32_ioctl;
 	struct msm_cpp_clock_settings_t clock_settings;
 	struct msm_pproc_queue_buf_info k_queue_buf;
-	struct msm_cpp_stream_buff_info_t k_cpp_buff_info;
+	struct msm_cpp_stream_buff_info32_t k32_cpp_buff_info;
+	struct msm_cpp_stream_buff_info_t k64_cpp_buff_info;
+	struct msm_cpp_frame_info32_t k32_frame_info;
+	struct msm_cpp_frame_info_t k64_frame_info;
 	void __user *up = (void __user *)arg;
+	bool is_copytouser_req = true;
 
 	if (sd == NULL) {
 		pr_err("%s: Subdevice is NULL\n", __func__);
@@ -2602,6 +3163,10 @@ static long msm_cpp_subdev_fops_compat_ioctl(struct file *file,
 	kp_ioctl.trans_code = up32_ioctl.trans_code;
 	/* Convert the 32 bit pointer to 64 bit pointer */
 	kp_ioctl.ioctl_ptr = compat_ptr(up32_ioctl.ioctl_ptr);
+	if (!kp_ioctl.ioctl_ptr) {
+		pr_err("%s: Invalid ioctl pointer\n", __func__);
+		return -EINVAL;
+	}
 
 	/*
 	 * Convert 32 bit IOCTL ID's to 64 bit IOCTL ID's
@@ -2611,21 +3176,28 @@ static long msm_cpp_subdev_fops_compat_ioctl(struct file *file,
 	switch (cmd) {
 	case VIDIOC_MSM_CPP_CFG32:
 	{
-		struct msm_cpp_frame_info32_t u32_frame_info;
+		struct msm_cpp_frame_info32_t k32_frame_info;
 		struct msm_cpp_frame_info_t *cpp_frame = NULL;
 		int32_t *status;
 
-		if (copy_from_user(&u32_frame_info,
+		if (copy_from_user(&k32_frame_info,
 			(void __user *)kp_ioctl.ioctl_ptr,
-			sizeof(u32_frame_info)))
+			sizeof(k32_frame_info)))
 			return -EFAULT;
 		/* Get the cpp frame pointer */
 		cpp_frame = get_64bit_cpp_frame_from_compat(&kp_ioctl);
 
 		/* Configure the cpp frame */
-		if (cpp_frame)
+		if (cpp_frame) {
 			rc = msm_cpp_cfg_frame(cpp_dev, cpp_frame);
-		else {
+			/* Cpp_frame can be free'd by cfg_frame in error */
+			if (rc >= 0) {
+				k32_frame_info.output_buffer_info[0] =
+					cpp_frame->output_buffer_info[0];
+				k32_frame_info.output_buffer_info[1] =
+					cpp_frame->output_buffer_info[1];
+			}
+		} else {
 			pr_err("%s: Error getting frame\n", __func__);
 			rc = -EINVAL;
 		}
@@ -2633,11 +3205,16 @@ static long msm_cpp_subdev_fops_compat_ioctl(struct file *file,
 		kp_ioctl.trans_code = rc;
 
 		/* Convert the 32 bit pointer to 64 bit pointer */
-		status = compat_ptr(u32_frame_info.status);
+		status = compat_ptr(k32_frame_info.status);
 
 		if (copy_to_user((void __user *)status, &rc,
 			sizeof(int32_t)))
 			pr_err("error cannot copy error\n");
+
+		if (copy_to_user((void __user *)kp_ioctl.ioctl_ptr,
+			&k32_frame_info,
+			sizeof(k32_frame_info)))
+			return -EFAULT;
 
 		cmd = VIDIOC_MSM_CPP_CFG;
 		break;
@@ -2665,29 +3242,31 @@ static long msm_cpp_subdev_fops_compat_ioctl(struct file *file,
 		cmd = VIDIOC_MSM_CPP_GET_HW_INFO;
 		break;
 	}
+	case VIDIOC_MSM_CPP_LOAD_FIRMWARE32:
+		cmd = VIDIOC_MSM_CPP_LOAD_FIRMWARE;
+		break;
 	case VIDIOC_MSM_CPP_GET_INST_INFO32:
 	{
+		struct cpp_device *cpp_dev = v4l2_get_subdevdata(sd);
 		struct msm_cpp_frame_info32_t inst_info;
-		struct v4l2_fh *vfh = file->private_data;
+		struct v4l2_fh *vfh = NULL;
 		uint32_t i;
-
-		memset(&inst_info, 0, sizeof(inst_info));
+		vfh = file->private_data;
+		memset(&inst_info, 0, sizeof(struct msm_cpp_frame_info32_t));
 		for (i = 0; i < MAX_ACTIVE_CPP_INSTANCE; i++) {
 			if (cpp_dev->cpp_subscribe_list[i].vfh == vfh) {
 				inst_info.inst_id = i;
 				break;
 			}
 		}
-		if (copy_to_user((void __user *)kp_ioctl.ioctl_ptr,
-			&inst_info, sizeof(inst_info)))
+		if (copy_to_user(
+				(void __user *)kp_ioctl.ioctl_ptr, &inst_info,
+				sizeof(struct msm_cpp_frame_info32_t))) {
 			return -EINVAL;
-
+		}
 		cmd = VIDIOC_MSM_CPP_GET_INST_INFO;
 		break;
 	}
-	case VIDIOC_MSM_CPP_LOAD_FIRMWARE32:
-		cmd = VIDIOC_MSM_CPP_LOAD_FIRMWARE;
-		break;
 	case VIDIOC_MSM_CPP_FLUSH_QUEUE32:
 		cmd = VIDIOC_MSM_CPP_FLUSH_QUEUE;
 		break;
@@ -2695,23 +3274,27 @@ static long msm_cpp_subdev_fops_compat_ioctl(struct file *file,
 	case VIDIOC_MSM_CPP_ENQUEUE_STREAM_BUFF_INFO32:
 	case VIDIOC_MSM_CPP_DELETE_STREAM_BUFF32:
 	{
-		struct msm_cpp_stream_buff_info32_t *u32_cpp_buff_info =
-		  (struct msm_cpp_stream_buff_info32_t *)kp_ioctl.ioctl_ptr;
+		if (kp_ioctl.len != sizeof(
+			struct msm_cpp_stream_buff_info32_t))
+			return -EINVAL;
+		else
+			kp_ioctl.len =
+				sizeof(struct msm_cpp_stream_buff_info_t);
 
-		k_cpp_buff_info.identity = u32_cpp_buff_info->identity;
-		k_cpp_buff_info.num_buffs = u32_cpp_buff_info->num_buffs;
-		k_cpp_buff_info.buffer_info =
-			compat_ptr(u32_cpp_buff_info->buffer_info);
-
-		kp_ioctl.ioctl_ptr = (void *)&k_cpp_buff_info;
-		if (is_compat_task()) {
-			if (kp_ioctl.len != sizeof(
-				struct msm_cpp_stream_buff_info32_t))
-				return -EINVAL;
-			else
-				kp_ioctl.len =
-				  sizeof(struct msm_cpp_stream_buff_info_t);
+		if (copy_from_user(&k32_cpp_buff_info,
+			(void __user *)kp_ioctl.ioctl_ptr,
+			sizeof(k32_cpp_buff_info))) {
+			pr_err("error: cannot copy user pointer\n");
+			return -EFAULT;
 		}
+
+		memset(&k64_cpp_buff_info, 0, sizeof(k64_cpp_buff_info));
+		k64_cpp_buff_info.identity = k32_cpp_buff_info.identity;
+		k64_cpp_buff_info.num_buffs = k32_cpp_buff_info.num_buffs;
+		k64_cpp_buff_info.buffer_info =
+			compat_ptr(k32_cpp_buff_info.buffer_info);
+		kp_ioctl.ioctl_ptr = (void *)&k64_cpp_buff_info;
+		is_copytouser_req = false;
 		if (cmd == VIDIOC_MSM_CPP_ENQUEUE_STREAM_BUFF_INFO32)
 			cmd = VIDIOC_MSM_CPP_ENQUEUE_STREAM_BUFF_INFO;
 		else if (cmd == VIDIOC_MSM_CPP_DELETE_STREAM_BUFF32)
@@ -2731,27 +3314,34 @@ static long msm_cpp_subdev_fops_compat_ioctl(struct file *file,
 		struct msm_cpp_frame_info32_t k32_process_frame;
 
 		CPP_DBG("VIDIOC_MSM_CPP_GET_EVENTPAYLOAD\n");
+		mutex_lock(&cpp_dev->mutex);
 		event_qcmd = msm_dequeue(queue, list_eventdata);
 		if (!event_qcmd) {
 			pr_err("no queue cmd available");
+			mutex_unlock(&cpp_dev->mutex);
 			return -EINVAL;
 		}
 		process_frame = event_qcmd->command;
 
+		memset(&k32_process_frame, 0, sizeof(k32_process_frame));
 		get_compat_frame_from_64bit(process_frame, &k32_process_frame);
 
 		CPP_DBG("fid %d\n", process_frame->frame_id);
 		if (copy_to_user((void __user *)kp_ioctl.ioctl_ptr,
-				&k32_process_frame,
-				sizeof(struct msm_cpp_frame_info32_t))) {
-					mutex_unlock(&cpp_dev->mutex);
-					return -EINVAL;
+			&k32_process_frame,
+			sizeof(struct msm_cpp_frame_info32_t))) {
+			kfree(process_frame->cpp_cmd_msg);
+			kfree(process_frame);
+			kfree(event_qcmd);
+			mutex_unlock(&cpp_dev->mutex);
+			return -EINVAL;
 		}
 
 		kfree(process_frame->cpp_cmd_msg);
 		kfree(process_frame);
 		kfree(event_qcmd);
 		cmd = VIDIOC_MSM_CPP_GET_EVENTPAYLOAD;
+		mutex_unlock(&cpp_dev->mutex);
 		break;
 	}
 	case VIDIOC_MSM_CPP_SET_CLOCK32:
@@ -2770,6 +3360,7 @@ static long msm_cpp_subdev_fops_compat_ioctl(struct file *file,
 				kp_ioctl.len =
 					sizeof(struct msm_cpp_clock_settings_t);
 		}
+		is_copytouser_req = false;
 		cmd = VIDIOC_MSM_CPP_SET_CLOCK;
 		break;
 	}
@@ -2791,15 +3382,40 @@ static long msm_cpp_subdev_fops_compat_ioctl(struct file *file,
 			u32_queue_buf->buff_mgr_info.timestamp.tv_sec;
 		k_queue_buf.buff_mgr_info.timestamp.tv_usec =
 			u32_queue_buf->buff_mgr_info.timestamp.tv_usec;
+		/*
+		 * Update the reserved field (cds information) to buffer
+		 * manager structure so that it is propogated back to HAL
+		 */
+		k_queue_buf.buff_mgr_info.reserved =
+			u32_queue_buf->buff_mgr_info.reserved;
 
 		kp_ioctl.ioctl_ptr = (void *)&k_queue_buf;
 		kp_ioctl.len = sizeof(struct msm_pproc_queue_buf_info);
+		is_copytouser_req = false;
 		cmd = VIDIOC_MSM_CPP_QUEUE_BUF;
 		break;
 	}
 	case VIDIOC_MSM_CPP_POP_STREAM_BUFFER32:
+	{
+		if (kp_ioctl.len != sizeof(struct msm_cpp_frame_info32_t))
+			return -EINVAL;
+		else
+			kp_ioctl.len = sizeof(struct msm_cpp_frame_info_t);
+
+		if (copy_from_user(&k32_frame_info,
+			(void __user *)kp_ioctl.ioctl_ptr,
+			sizeof(k32_frame_info)))
+			return -EFAULT;
+
+		memset(&k64_frame_info, 0, sizeof(k64_frame_info));
+		k64_frame_info.identity = k32_frame_info.identity;
+		k64_frame_info.frame_id = k32_frame_info.frame_id;
+
+		kp_ioctl.ioctl_ptr = (void *)&k64_frame_info;
+		is_copytouser_req = false;
 		cmd = VIDIOC_MSM_CPP_POP_STREAM_BUFFER;
 		break;
+	}
 	case VIDIOC_MSM_CPP_IOMMU_ATTACH32:
 		cmd = VIDIOC_MSM_CPP_IOMMU_ATTACH;
 		break;
@@ -2810,9 +3426,9 @@ static long msm_cpp_subdev_fops_compat_ioctl(struct file *file,
 		cmd = MSM_SD_SHUTDOWN;
 		break;
 	default:
-		pr_err_ratelimited("%s: unsupported compat type :%d\n",
-				__func__, cmd);
-		break;
+		pr_err_ratelimited("%s: unsupported compat type :%x LOAD %lu\n",
+				__func__, cmd, VIDIOC_MSM_CPP_LOAD_FIRMWARE);
+		return -EINVAL;
 	}
 
 	switch (cmd) {
@@ -2838,17 +3454,19 @@ static long msm_cpp_subdev_fops_compat_ioctl(struct file *file,
 	default:
 		pr_err_ratelimited("%s: unsupported compat type :%d\n",
 				__func__, cmd);
-		break;
+		return -EINVAL;
 	}
 
-	up32_ioctl.id = kp_ioctl.id;
-	up32_ioctl.len = kp_ioctl.len;
-	up32_ioctl.trans_code = kp_ioctl.trans_code;
-	up32_ioctl.ioctl_ptr = ptr_to_compat(kp_ioctl.ioctl_ptr);
+	if (is_copytouser_req) {
+		up32_ioctl.id = kp_ioctl.id;
+		up32_ioctl.len = kp_ioctl.len;
+		up32_ioctl.trans_code = kp_ioctl.trans_code;
+		up32_ioctl.ioctl_ptr = ptr_to_compat(kp_ioctl.ioctl_ptr);
 
-	if (copy_to_user((void __user *)up, &up32_ioctl, sizeof(up32_ioctl)))
-		return -EFAULT;
-
+		if (copy_to_user((void __user *)up, &up32_ioctl,
+			sizeof(up32_ioctl)))
+			return -EFAULT;
+	}
 	return rc;
 }
 #endif
@@ -2960,6 +3578,7 @@ static int cpp_probe(struct platform_device *pdev)
 	platform_set_drvdata(pdev, &cpp_dev->msm_sd.sd);
 	mutex_init(&cpp_dev->mutex);
 	spin_lock_init(&cpp_dev->tasklet_lock);
+	spin_lock_init(&cpp_timer.data.processed_frame_lock);
 
 	if (pdev->dev.of_node)
 		of_property_read_u32((&pdev->dev)->of_node,
@@ -3027,6 +3646,13 @@ static int cpp_probe(struct platform_device *pdev)
 		goto iommu_err;
 	}
 
+	if (pdev->dev.of_node)
+		rc = of_property_read_u32(pdev->dev.of_node, "bus_master",
+			&cpp_dev->bus_master_flag);
+	if (rc)
+		cpp_dev->bus_master_flag = 0;
+	pr_err("Bus master %d\n", cpp_dev->bus_master_flag);
+
 	rc = cpp_init_hardware(cpp_dev);
 	if (rc < 0)
 		goto cpp_probe_init_error;
@@ -3088,7 +3714,12 @@ static int cpp_probe(struct platform_device *pdev)
 	cpp_dev->iommu_state = CPP_IOMMU_STATE_DETACHED;
 	cpp_timer.data.cpp_dev = cpp_dev;
 	atomic_set(&cpp_timer.used, 0);
+	/* install timer for cpp timeout */
+	CPP_DBG("Installing cpp_timer\n");
+	setup_timer(&cpp_timer.cpp_timer,
+		cpp_timer_callback, (unsigned long)&cpp_timer);
 	cpp_dev->fw_name_bin = NULL;
+	cpp_dev->max_timeout_trial_cnt = MSM_CPP_MAX_TIMEOUT_TRIAL;
 	if (rc == 0)
 		CPP_DBG("SUCCESS.");
 	else

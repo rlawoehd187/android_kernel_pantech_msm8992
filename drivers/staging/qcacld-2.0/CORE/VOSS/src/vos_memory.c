@@ -57,6 +57,7 @@
 #ifdef CONFIG_WCNSS_MEM_PRE_ALLOC
 #ifdef CONFIG_CNSS
 #include <net/cnss.h>
+#include <net/cnss_prealloc.h>
 #else
 #include <wcnss_api.h>
 #endif

@@ -6,7 +6,7 @@
  * Copyright (C) 2008 Nokia Corporation
  * Copyright (C) 2009 Samsung Electronics
  *			Author: Michal Nazarewicz (mina86@mina86.com)
- * Copyright (c) 2012-2015, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2012-2017, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2
@@ -35,6 +35,11 @@
 #include "rndis.h"
 #include "u_bam_data.h"
 #include <linux/rndis_ipa.h>
+
+unsigned int rndis_dl_max_xfer_size = 9216;
+module_param(rndis_dl_max_xfer_size, uint, S_IRUGO | S_IWUSR);
+MODULE_PARM_DESC(rndis_dl_max_xfer_size,
+		"Max size of bus transfer to host");
 
 /*
  * This function is an RNDIS Ethernet port -- a Microsoft protocol that's
@@ -548,7 +553,21 @@ static void rndis_qc_command_complete(struct usb_ep *ep,
 	if (buf->MessageType == RNDIS_MSG_INIT) {
 		ul_max_xfer_size = rndis_get_ul_max_xfer_size(rndis->config);
 		u_bam_data_set_ul_max_xfer_size(ul_max_xfer_size);
-		dl_max_xfer_size = rndis_get_dl_max_xfer_size(rndis->config);
+		/*
+		 * For consistent data throughput from IPA, it is required to
+		 * fine tune aggregation byte limit as 7KB. RNDIS IPA driver
+		 * use provided this value to calculate aggregation byte limit
+		 * and program IPA hardware for aggregation.
+		 * Host provides 8KB or 16KB as Max Transfer size, hence select
+		 * minimum out of host provided value and optimum transfer size
+		 * to get 7KB as aggregation byte limit.
+		 */
+		if (rndis_dl_max_xfer_size)
+			dl_max_xfer_size = min_t(u32, rndis_dl_max_xfer_size,
+				rndis_get_dl_max_xfer_size(rndis->config));
+		else
+			dl_max_xfer_size =
+				rndis_get_dl_max_xfer_size(rndis->config);
 		u_bam_data_set_dl_max_xfer_size(dl_max_xfer_size);
 	}
 }
@@ -1260,8 +1279,6 @@ rndis_qc_bind_config_vendor(struct usb_configuration *c, u8 ethaddr[ETH_ALEN],
 	rndis->port.func.suspend = rndis_qc_suspend;
 	rndis->port.func.resume = rndis_qc_resume;
 
-	_rndis_qc = rndis;
-
 	if (rndis->xport == USB_GADGET_XPORT_BAM2BAM_IPA) {
 		status = rndis_ipa_init(&rndis_ipa_params);
 		if (status) {
@@ -1277,6 +1294,8 @@ rndis_qc_bind_config_vendor(struct usb_configuration *c, u8 ethaddr[ETH_ALEN],
 		goto fail;
 	}
 
+	_rndis_qc = rndis;
+
 	return 0;
 
 fail:
@@ -1288,74 +1307,115 @@ fail:
 
 static int rndis_qc_open_dev(struct inode *ip, struct file *fp)
 {
+	int ret = 0;
+	unsigned long flags;
 	pr_info("Open rndis QC driver\n");
 
+	spin_lock_irqsave(&rndis_lock, flags);
 	if (!_rndis_qc) {
 		pr_err("rndis_qc_dev not created yet\n");
-		return -ENODEV;
+		ret = -ENODEV;
+		goto fail;
 	}
 
 	if (rndis_qc_lock(&_rndis_qc->open_excl)) {
 		pr_err("Already opened\n");
-		return -EBUSY;
+		ret = -EBUSY;
+		goto fail;
 	}
 
 	fp->private_data = _rndis_qc;
-	pr_info("rndis QC file opened\n");
+fail:
+	spin_unlock_irqrestore(&rndis_lock, flags);
 
-	return 0;
+	if (!ret)
+		pr_info("rndis QC file opened\n");
+
+	return ret;
 }
 
 static int rndis_qc_release_dev(struct inode *ip, struct file *fp)
 {
-	struct f_rndis_qc	*rndis = fp->private_data;
-
+	unsigned long flags;
 	pr_info("Close rndis QC file\n");
-	rndis_qc_unlock(&rndis->open_excl);
 
+	spin_lock_irqsave(&rndis_lock, flags);
+
+	if (!_rndis_qc) {
+		pr_err("rndis_qc_dev not present\n");
+		spin_unlock_irqrestore(&rndis_lock, flags);
+		return -ENODEV;
+	}
+	rndis_qc_unlock(&_rndis_qc->open_excl);
+	spin_unlock_irqrestore(&rndis_lock, flags);
 	return 0;
 }
 
 static long rndis_qc_ioctl(struct file *fp, unsigned cmd, unsigned long arg)
 {
-	struct f_rndis_qc	*rndis = fp->private_data;
+	u8 qc_max_pkt_per_xfer = 0;
+	u32 qc_max_pkt_size = 0;
 	int ret = 0;
+	unsigned long flags;
+
+	spin_lock_irqsave(&rndis_lock, flags);
+	if (!_rndis_qc) {
+		pr_err("rndis_qc_dev not present\n");
+		ret = -ENODEV;
+		goto fail;
+	}
+
+	qc_max_pkt_per_xfer = _rndis_qc->ul_max_pkt_per_xfer;
+	qc_max_pkt_size = _rndis_qc->max_pkt_size;
+
+	if (rndis_qc_lock(&_rndis_qc->ioctl_excl)) {
+		ret = -EBUSY;
+		goto fail;
+	}
+
+	spin_unlock_irqrestore(&rndis_lock, flags);
 
 	pr_info("Received command %d\n", cmd);
-
-	if (rndis_qc_lock(&rndis->ioctl_excl))
-		return -EBUSY;
 
 	switch (cmd) {
 	case RNDIS_QC_GET_MAX_PKT_PER_XFER:
 		ret = copy_to_user((void __user *)arg,
-					&rndis->ul_max_pkt_per_xfer,
-					sizeof(rndis->ul_max_pkt_per_xfer));
+					&qc_max_pkt_per_xfer,
+					sizeof(qc_max_pkt_per_xfer));
 		if (ret) {
 			pr_err("copying to user space failed\n");
 			ret = -EFAULT;
 		}
 		pr_info("Sent UL max packets per xfer %d\n",
-				rndis->ul_max_pkt_per_xfer);
+				qc_max_pkt_per_xfer);
 		break;
 	case RNDIS_QC_GET_MAX_PKT_SIZE:
 		ret = copy_to_user((void __user *)arg,
-					&rndis->max_pkt_size,
-					sizeof(rndis->max_pkt_size));
+					&qc_max_pkt_size,
+					sizeof(qc_max_pkt_size));
 		if (ret) {
 			pr_err("copying to user space failed\n");
 			ret = -EFAULT;
 		}
 		pr_debug("Sent max packet size %d\n",
-				rndis->max_pkt_size);
+				qc_max_pkt_size);
 		break;
 	default:
 		pr_err("Unsupported IOCTL\n");
 		ret = -EINVAL;
 	}
 
-	rndis_qc_unlock(&rndis->ioctl_excl);
+	spin_lock_irqsave(&rndis_lock, flags);
 
+	if (!_rndis_qc) {
+		pr_err("rndis_qc_dev not present\n");
+		ret = -ENODEV;
+		goto fail;
+	}
+	rndis_qc_unlock(&_rndis_qc->ioctl_excl);
+
+fail:
+	spin_unlock_irqrestore(&rndis_lock, flags);
 	return ret;
 }
 
@@ -1378,10 +1438,11 @@ static int rndis_qc_init(void)
 
 	pr_info("initialize rndis QC instance\n");
 
+	spin_lock_init(&rndis_lock);
+
 	ret = misc_register(&rndis_qc_device);
 	if (ret)
 		pr_err("rndis QC driver failed to register\n");
-	spin_lock_init(&rndis_lock);
 
 	ret = bam_data_setup(USB_FUNC_RNDIS, RNDIS_QC_NO_PORTS);
 	if (ret) {

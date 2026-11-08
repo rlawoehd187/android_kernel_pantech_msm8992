@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2014, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2013-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -83,7 +83,7 @@ static void qti_ctrl_queue_notify(struct qti_ctrl_port *port)
 
 	spin_lock_irqsave(&port->lock, flags);
 	if (!port->is_open) {
-		pr_err("%s: rmnet ctrl file handler %p is not open",
+		pr_err("%s: rmnet ctrl file handler %pK is not open",
 			   __func__, port);
 		spin_unlock_irqrestore(&port->lock, flags);
 		return;
@@ -136,7 +136,7 @@ static int gqti_ctrl_send_cpkt_tomodem(u8 portno, void *buf, size_t len)
 
 	/* drop cpkt if port is not open */
 	if (!port->is_open) {
-		pr_debug("rmnet file handler %p(index=%d) is not open",
+		pr_debug("rmnet file handler %pK(index=%d) is not open",
 		       port, port->index);
 		spin_unlock_irqrestore(&port->lock, flags);
 		free_rmnet_ctrl_pkt(cpkt);
@@ -178,7 +178,7 @@ int gqti_ctrl_connect(void *gr, u8 port_num, unsigned intf,
 	struct gqdss *g_dpl = NULL;
 	unsigned long flags;
 
-	pr_debug("%s: gtype:%d gadget:%p\n", __func__, gtype, gr);
+	pr_debug("%s: gtype:%d gadget:%pK\n", __func__, gtype, gr);
 	if (port_num >= NR_QTI_PORTS) {
 		pr_err("%s: Invalid QTI port %d\n", __func__, port_num);
 		return -ENODEV;
@@ -249,7 +249,7 @@ void gqti_ctrl_disconnect(void *gr, u8 port_num)
 	struct grmnet *g_rmnet = NULL;
 	struct gqdss *g_dpl = NULL;
 
-	pr_debug("%s: gadget:%p\n", __func__, gr);
+	pr_debug("%s: gadget:%pK\n", __func__, gr);
 
 	if (port_num >= NR_QTI_PORTS) {
 		pr_err("%s: Invalid QTI port %d\n", __func__, port_num);
@@ -263,17 +263,6 @@ void gqti_ctrl_disconnect(void *gr, u8 port_num)
 		return;
 	}
 
-	if (gr && (port->gtype == USB_GADGET_RMNET)) {
-		g_rmnet = (struct grmnet *)gr;
-		g_rmnet->disconnect(port->port_usb);
-	} else if (gr && (port->gtype == USB_GADGET_DPL)) {
-		g_dpl = (struct gqdss *)gr;
-	} else {
-		pr_err("%s(): unrecognized gadget type(%d).\n",
-					__func__, port->gtype);
-		return;
-	}
-
 	atomic_set(&port->connected, 0);
 	atomic_set(&port->line_state, 0);
 	spin_lock_irqsave(&port->lock, flags);
@@ -283,14 +272,17 @@ void gqti_ctrl_disconnect(void *gr, u8 port_num)
 	port->ipa_cons_idx = -1;
 	port->port_usb = NULL;
 
-	if (g_rmnet) {
+	if (gr && port->gtype == USB_GADGET_RMNET) {
+		g_rmnet = (struct grmnet *)gr;
 		g_rmnet->send_encap_cmd = NULL;
 		g_rmnet->notify_modem = NULL;
-	}
-
-	if (g_dpl) {
+	} else if (gr && port->gtype == USB_GADGET_DPL) {
+		g_dpl = (struct gqdss *)gr;
 		g_dpl->send_encap_cmd = NULL;
 		g_dpl->notify_modem = NULL;
+	} else {
+		pr_err("%s(): unrecognized gadget type(%d).\n",
+					__func__, port->gtype);
 	}
 
 	while (!list_empty(&port->cpkt_req_q)) {

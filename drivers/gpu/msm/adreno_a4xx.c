@@ -37,7 +37,7 @@ const unsigned int a4xx_registers[] = {
 	0x0028, 0x002B, 0x002E, 0x0034, 0x0037, 0x0044, 0x0047, 0x0066,
 	0x0068, 0x0095, 0x009C, 0x0170, 0x0174, 0x01AF,
 	/* CP */
-	0x0200, 0x0226, 0x0228, 0x0233, 0x0240, 0x0250, 0x04C0, 0x04D0,
+	0x0200, 0x0226, 0x0228, 0x0233, 0x0240, 0x0258, 0x04C0, 0x04D0,
 	0x04D2, 0x04DD, 0x0500, 0x050B, 0x0578, 0x058F,
 	/* VSC */
 	0x0C00, 0x0C03, 0x0C08, 0x0C41, 0x0C50, 0x0C51,
@@ -657,6 +657,7 @@ static void a4xx_protect_init(struct adreno_device *adreno_dev)
 		 */
 		adreno_set_protected_registers(adreno_dev, &index, 0x2c00, 10);
 		adreno_set_protected_registers(adreno_dev, &index, 0x3300, 8);
+		adreno_set_protected_registers(adreno_dev, &index, 0x3400, 10);
 	}
 
 	/* SMMU registers */
@@ -734,8 +735,11 @@ static void a4xx_start(struct adreno_device *adreno_dev)
 	/* On A420 cores turn on SKIP_IB2_DISABLE in addition to the default */
 	if (adreno_is_a420(adreno_dev))
 		cp_debug |= (1 << 29);
-	/* Set chicken bit to disable the speed up of bootstrap on A430 */
-	else if (adreno_is_a430(adreno_dev))
+	/*
+	 * Set chicken bit to disable the speed up of bootstrap on A430
+	 * and its derivatives
+	 */
+	else
 		cp_debug |= (1 << 14);
 
 	kgsl_regwrite(device, A4XX_CP_DEBUG, cp_debug);
@@ -761,8 +765,8 @@ static void a4xx_start(struct adreno_device *adreno_dev)
 		kgsl_regwrite(device, A4XX_RBBM_CLOCK_DELAY_HLSQ, val);
 	}
 
-	/* A430 offers a bigger chunk of CP_STATE_DEBUG registers */
-	if (adreno_is_a430(adreno_dev))
+	/* A430 and derivatives offers bigger chunk of CP_STATE_DEBUG regs */
+	if (!adreno_is_a420(adreno_dev))
 		a4xx_snap_sizes.cp_state_deb = 0x34;
 
 	a4xx_protect_init(adreno_dev);
@@ -1033,6 +1037,7 @@ static unsigned int a4xx_register_offsets[ADRENO_REG_REGISTER_MAX] = {
 	ADRENO_REG_DEFINE(ADRENO_REG_CP_MEQ_DATA, A4XX_CP_MEQ_DATA),
 	ADRENO_REG_DEFINE(ADRENO_REG_CP_HW_FAULT, A4XX_CP_HW_FAULT),
 	ADRENO_REG_DEFINE(ADRENO_REG_CP_PROTECT_STATUS, A4XX_CP_PROTECT_STATUS),
+	ADRENO_REG_DEFINE(ADRENO_REG_CP_SCRATCH_REG0, A4XX_CP_SCRATCH_REG0),
 	ADRENO_REG_DEFINE(ADRENO_REG_CP_SCRATCH_REG6, A4XX_CP_SCRATCH_REG6),
 	ADRENO_REG_DEFINE(ADRENO_REG_CP_SCRATCH_REG7, A4XX_CP_SCRATCH_REG7),
 	ADRENO_REG_DEFINE(ADRENO_REG_CP_PROTECT_REG_0, A4XX_CP_PROTECT_REG_0),
@@ -1066,6 +1071,14 @@ static unsigned int a4xx_register_offsets[ADRENO_REG_REGISTER_MAX] = {
 				A4XX_RBBM_SECVID_TRUST_CONTROL),
 	ADRENO_REG_DEFINE(ADRENO_REG_RBBM_ALWAYSON_COUNTER_LO,
 				A4XX_RBBM_ALWAYSON_COUNTER_LO),
+	ADRENO_REG_DEFINE(ADRENO_REG_RBBM_SECVID_TRUST_CONFIG,
+				A4XX_RBBM_SECVID_TRUST_CONFIG),
+	ADRENO_REG_DEFINE(ADRENO_REG_RBBM_SECVID_TSB_CONTROL,
+				A4XX_RBBM_SECVID_TSB_CONTROL),
+	ADRENO_REG_DEFINE(ADRENO_REG_RBBM_SECVID_TSB_TRUSTED_BASE,
+				A4XX_RBBM_SECVID_TSB_TRUSTED_BASE),
+	ADRENO_REG_DEFINE(ADRENO_REG_RBBM_SECVID_TSB_TRUSTED_SIZE,
+				A4XX_RBBM_SECVID_TSB_TRUSTED_SIZE),
 	ADRENO_REG_DEFINE(ADRENO_REG_VBIF_XIN_HALT_CTRL0,
 				A4XX_VBIF_XIN_HALT_CTRL0),
 	ADRENO_REG_DEFINE(ADRENO_REG_VBIF_XIN_HALT_CTRL1,
@@ -1807,6 +1820,7 @@ static struct adreno_coresight a4xx_coresight = {
 	 (1 << A4XX_INT_CP_IB1_INT) |			\
 	 (1 << A4XX_INT_CP_IB2_INT) |			\
 	 (1 << A4XX_INT_CP_RB_INT) |			\
+	 (1 << A4XX_INT_CACHE_FLUSH_TS) |		\
 	 (1 << A4XX_INT_CP_REG_PROTECT_FAULT) |		\
 	 (1 << A4XX_INT_CP_AHB_ERROR_HALT) |		\
 	 (1 << A4XX_INT_RBBM_ATB_BUS_OVERFLOW) |	\
@@ -1843,7 +1857,7 @@ static struct adreno_irq_funcs a4xx_irq_funcs[] = {
 	ADRENO_IRQ_CALLBACK(NULL), /* 17 - CP_RB_DONE_TS */
 	ADRENO_IRQ_CALLBACK(NULL), /* 18 - CP_VS_DONE_TS */
 	ADRENO_IRQ_CALLBACK(NULL), /* 19 - CP_PS_DONE_TS */
-	ADRENO_IRQ_CALLBACK(NULL), /* 20 - CP_CACHE_FLUSH_TS */
+	ADRENO_IRQ_CALLBACK(adreno_cp_callback), /* 20 - CP_CACHE_FLUSH_TS */
 	/* 21 - CP_AHB_ERROR_FAULT */
 	ADRENO_IRQ_CALLBACK(a4xx_err_callback),
 	ADRENO_IRQ_CALLBACK(a4xx_err_callback), /* 22 - RBBM_ATB_BUS_OVERFLOW */

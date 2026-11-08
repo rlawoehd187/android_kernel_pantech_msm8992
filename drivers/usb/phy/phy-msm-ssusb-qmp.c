@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2014, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2013-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -34,6 +34,7 @@
 #define PCIE_USB3_PHY_POWER_DOWN_CONTROL	0x604
 #define PCIE_USB3_PHY_START			0x608
 #define PCIE_USB3_PHY_AUTONOMOUS_MODE_CTRL	0x6BC
+#define PCIE_USB3_PHY_LFPS_RXTERM_IRQ_CLEAR	0x6C0
 
 #define PCIE_USB3_PHY_PCS_STATUS		0x728
 #define PHYSTATUS				BIT(6)
@@ -199,6 +200,14 @@ static const struct qmp_reg_val qmp_settings_rev0_misc[] = {
 	{-1, -1} /* terminating entry */
 };
 
+/* Vbg related settings */
+static const struct qmp_reg_val qmp_settings_rev1_misc[] = {
+	{0x0C, 0x03}, /* QSERDES_COM_IE_TRIM */
+	{0x10, 0x00}, /* QSERDES_COM_IP_TRIM */
+	{0xA0, 0xFF}, /* QSERDES_COM_BGTC */
+	{-1, -1} /* terminating entry */
+};
+
 struct msm_ssphy_qmp {
 	struct usb_phy		phy;
 	void __iomem		*base;
@@ -233,6 +242,13 @@ static void msm_ssusb_qmp_enable_autonomous(struct msm_ssphy_qmp *phy)
 
 	dev_dbg(phy->phy.dev, "enabling QMP autonomous mode with cable %s\n",
 			get_cable_status_str(phy));
+
+	/* clear LFPS RXTERM interrupt */
+	writeb_relaxed(1, phy->base + PCIE_USB3_PHY_LFPS_RXTERM_IRQ_CLEAR);
+	/* flush the previous write before next write */
+	wmb();
+	writeb_relaxed(0, phy->base + PCIE_USB3_PHY_LFPS_RXTERM_IRQ_CLEAR);
+
 	val = readb_relaxed(phy->base + PCIE_USB3_PHY_AUTONOMOUS_MODE_CTRL);
 
 	val |= ARCVR_DTCT_EN;
@@ -443,6 +459,7 @@ static int msm_ssphy_qmp_init(struct usb_phy *uphy)
 		break;
 	case 0x10000001:
 		reg = qmp_settings_rev1;
+		misc = qmp_settings_rev1_misc;
 		break;
 	default:
 		dev_err(uphy->dev, "Unknown revid 0x%x, cannot initialize PHY\n",
@@ -457,7 +474,8 @@ static int msm_ssphy_qmp_init(struct usb_phy *uphy)
 	writel_relaxed(0x01, phy->base + PCIE_USB3_PHY_POWER_DOWN_CONTROL);
 
 	/* Main configuration */
-	if (configure_phy_regs(uphy, reg)) {
+	ret = configure_phy_regs(uphy, reg);
+	if (ret) {
 		dev_err(uphy->dev, "Failed the main PHY configuration\n");
 		return ret;
 	}
@@ -465,16 +483,19 @@ static int msm_ssphy_qmp_init(struct usb_phy *uphy)
 	/* Feature specific configurations */
 	if (phy->override_pll_cal) {
 		reg = qmp_override_pll;
-		if (configure_phy_regs(uphy, reg)) {
+		ret = configure_phy_regs(uphy, reg);
+		if (ret) {
 			dev_err(uphy->dev,
 				"Failed the PHY PLL override configuration\n");
 			return ret;
 		}
 	}
 	if (phy->misc_config) {
-		configure_phy_regs(uphy, misc);
-		dev_err(uphy->dev, "Failed the misc PHY configuration\n");
-		return ret;
+		ret = configure_phy_regs(uphy, misc);
+		if (ret) {
+			dev_err(uphy->dev, "Failed the misc PHY configuration\n");
+			return ret;
+		}
 	}
 
 	writel_relaxed(0x00, phy->base + PCIE_USB3_PHY_SW_RESET);
