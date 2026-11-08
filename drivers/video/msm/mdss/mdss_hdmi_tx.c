@@ -4074,6 +4074,27 @@ static void hdmi_tx_put_dt_data(struct device *dev,
 		hdmi_tx_put_dt_gpio_data(dev, &pdata->power_data[i]);
 } /* hdmi_tx_put_dt_data */
 
+/* Is an available MHL bridge node pointing at this HDMI controller? */
+static bool hdmi_tx_has_mhl_bridge(struct device_node *hdmi_node)
+{
+	struct device_node *np, *tx;
+	bool found = false;
+
+	for_each_node_with_property(np, "qcom,hdmi-tx-map") {
+		if (!of_device_is_available(np))
+			continue;
+		tx = of_parse_phandle(np, "qcom,hdmi-tx-map", 0);
+		found = (tx == hdmi_node);
+		of_node_put(tx);
+		if (found) {
+			of_node_put(np);
+			break;
+		}
+	}
+
+	return found;
+}
+
 static int hdmi_tx_get_dt_data(struct platform_device *pdev,
 	struct hdmi_tx_platform_data *pdata)
 {
@@ -4136,6 +4157,16 @@ static int hdmi_tx_get_dt_data(struct platform_device *pdev,
 
 	pdata->cond_power_on = of_property_read_bool(pdev->dev.of_node,
 		"qcom,conditional-power-on");
+
+	/*
+	 * When the HDMI output only goes through an MHL bridge, HPD must be
+	 * driven by the bridge. Treat it as registered from the start, so
+	 * that HPD is not enabled before the bridge reports a sink.
+	 */
+	if (hdmi_tx_has_mhl_bridge(pdev->dev.of_node)) {
+		DEV_INFO("%s: HPD is controlled by the MHL bridge\n", __func__);
+		hdmi_ctrl->ds_registered = true;
+	}
 
 	 splash_en = of_property_read_bool(pdev->dev.of_node,
 			"qcom,cont-splash-enabled");
