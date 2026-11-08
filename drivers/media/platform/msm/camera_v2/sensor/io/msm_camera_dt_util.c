@@ -545,6 +545,12 @@ int msm_camera_get_dt_power_setting_data(struct device_node *of_node,
 				ps[i].seq_val = SENSOR_GPIO_CUSTOM1;
 			else if (!strcmp(seq_name, "sensor_gpio_custom2"))
 				ps[i].seq_val = SENSOR_GPIO_CUSTOM2;
+			else if (!strcmp(seq_name, "sensor_gpio_svdd_en"))
+				ps[i].seq_val = SENSOR_GPIO_SVDD_EN;
+			else if (!strcmp(seq_name, "sensor_gpio_avdd_en"))
+				ps[i].seq_val = SENSOR_GPIO_AVDD_EN;
+			else if (!strcmp(seq_name, "sensor_gpio_iovdd_en"))
+				ps[i].seq_val = SENSOR_GPIO_IOVDD_EN;
 			else
 				rc = -EILSEQ;
 			break;
@@ -826,7 +832,15 @@ int msm_camera_init_gpio_pin_tbl(struct device_node *of_node,
 	struct msm_camera_gpio_conf *gconf, uint16_t *gpio_array,
 	uint16_t gpio_array_size)
 {
-	int rc = 0, val = 0;
+	static const struct {
+		const char *prop;
+		enum msm_sensor_power_seq_gpio_t idx;
+	} en_gpios[] = {
+		{ "qcom,gpio-svdd-en", SENSOR_GPIO_SVDD_EN },
+		{ "qcom,gpio-avdd-en", SENSOR_GPIO_AVDD_EN },
+		{ "qcom,gpio-iovdd-en", SENSOR_GPIO_IOVDD_EN },
+	};
+	int rc = 0, val = 0, i;
 
 	gconf->gpio_num_info = kzalloc(sizeof(struct msm_camera_gpio_num_info),
 		GFP_KERNEL);
@@ -1084,6 +1098,30 @@ int msm_camera_init_gpio_pin_tbl(struct device_node *of_node,
 			gconf->gpio_num_info->gpio_num[SENSOR_GPIO_CUSTOM2]);
 	} else {
 		rc = 0;
+	}
+
+	/* regulator enable lines of discrete camera power rails */
+	for (i = 0; i < ARRAY_SIZE(en_gpios); i++) {
+		rc = of_property_read_u32(of_node, en_gpios[i].prop, &val);
+		if (rc == -EINVAL) {
+			rc = 0;
+			continue;
+		}
+		if (rc < 0) {
+			pr_err("%s:%d read %s failed rc %d\n",
+				__func__, __LINE__, en_gpios[i].prop, rc);
+			goto ERROR;
+		} else if (val >= gpio_array_size) {
+			pr_err("%s:%d %s invalid %d\n",
+				__func__, __LINE__, en_gpios[i].prop, val);
+			rc = -EINVAL;
+			goto ERROR;
+		}
+		gconf->gpio_num_info->gpio_num[en_gpios[i].idx] =
+			gpio_array[val];
+		gconf->gpio_num_info->valid[en_gpios[i].idx] = 1;
+		CDBG("%s %s %d\n", __func__, en_gpios[i].prop,
+			gconf->gpio_num_info->gpio_num[en_gpios[i].idx]);
 	}
 
 	return rc;
