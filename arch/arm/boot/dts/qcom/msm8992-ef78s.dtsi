@@ -281,7 +281,7 @@
 		interrupt-parent = <&msm_gpio>;
 		interrupts = <0x1d 0x0>;
 		interrupt-names = "irq_qpio";
-		pinctrl-names = "nfc_gpio_active", "nfc_gpio_suspend";
+		pinctrl-names = "default", "sleep";
 		pinctrl-0 = <&pn547_nfc_int_pin_active &pn547_nfc_ven_pin_active &pn547_nfc_firm_pin_active>;
 		pinctrl-1 = <&pn547_nfc_int_pin_suspend &pn547_nfc_ven_pin_suspend &pn547_nfc_firm_pin_suspend>;
 		nxp,clk-gpio = <&pm8994_gpios 0xa 0x0>;
