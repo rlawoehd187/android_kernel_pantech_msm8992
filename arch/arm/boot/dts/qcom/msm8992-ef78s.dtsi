@@ -204,6 +204,8 @@
 	 * for good. Stock charges regardless; do the same.
 	 */
 	qcom,jeita-temp-hard-limit = <0>;
+	/* the FG has no battery profile here: the SOC comes from the MAX17058 */
+	qcom,charge-unknown-battery;
 };
 
 &pmi8994_haptics {
