@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2014 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2013-2015 The Linux Foundation. All rights reserved.
  *
  * Previously licensed under the ISC license by Qualcomm Atheros, Inc.
  *
@@ -43,10 +43,14 @@
 /*--------------------------------------------------------------------------
   Include Files
   ------------------------------------------------------------------------*/
-#include <wlan_qct_wdi_ds.h>
 #include "adf_os_types.h"
 /*
  * Rx Packet Struct
+ * rssi field is normalized to -96 dBm as normal noise floor by adding
+ * -96 to snr. All the configured thresholds in the driver assume that
+ * noise floor is -96 dBm.
+ * rssi_raw field is signal strength of the received frame relative
+ * to the noise floor recorded in hardware.
  */
 typedef struct
 {
@@ -64,7 +68,9 @@ typedef struct
    u_int8_t  scan:1;
    u_int8_t  dpuFeedback;
    u_int8_t  sessionId;
-   u_int8_t  scan_src:1;
+   u_int8_t  scan_src;
+   u_int32_t rssi_raw;
+   u_int32_t tsf_delta;
 }t_packetmeta, *tp_packetmeta;
 
 /* implementation specific vos packet type */

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2014 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2013-2016 The Linux Foundation. All rights reserved.
  *
  * Previously licensed under the ISC license by Qualcomm Atheros, Inc.
  *
@@ -74,8 +74,11 @@ typedef enum {
     GEN_PARAM_DUMP_WATCHDOG,
     GEN_PARAM_CRASH_INJECT,
 #ifdef CONFIG_ATH_PCIE_ACCESS_DEBUG
-    GEN_PARAM_DUMP_PCIE_ACCESS_LOG
+    GEN_PARAM_DUMP_PCIE_ACCESS_LOG,
 #endif
+    GEN_PARAM_MODULATED_DTIM,
+    GEN_PARAM_CAPTURE_TSF,
+    GEN_PARAM_RESET_TSF_GPIO,
 } GEN_PARAM;
 
 #define VDEV_CMD 1
@@ -97,6 +100,8 @@ VOS_STATUS wma_stop(v_VOID_t *vos_context, tANI_U8 reason);
 VOS_STATUS wma_close(v_VOID_t *vos_context);
 
 VOS_STATUS wma_wmi_service_close(v_VOID_t *vos_context);
+
+VOS_STATUS wma_wmi_work_close(v_VOID_t *vos_context);
 
 v_VOID_t wma_rx_ready_event(WMA_HANDLE handle, v_VOID_t *ev);
 
@@ -121,11 +126,16 @@ VOS_STATUS WMA_GetWcnssSoftwareVersion(v_PVOID_t pvosGCtx, tANI_U8 *pVersion,
                                        tANI_U32 versionBufferSize);
 int wma_suspend_target(WMA_HANDLE handle, int disable_target_intr);
 void wma_target_suspend_acknowledge(void *context);
-int wma_resume_target(WMA_HANDLE handle);
-int wma_disable_wow_in_fw(WMA_HANDLE handle);
+int wma_resume_target(WMA_HANDLE handle, int);
+int wma_disable_wow_in_fw(WMA_HANDLE handle, int);
 int wma_is_wow_mode_selected(WMA_HANDLE handle);
-int wma_enable_wow_in_fw(WMA_HANDLE handle);
+int wma_enable_wow_in_fw(WMA_HANDLE handle, int);
 bool wma_check_scan_in_progress(WMA_HANDLE handle);
+#ifdef FEATURE_RUNTIME_PM
+int wma_runtime_suspend_req(WMA_HANDLE handle);
+int wma_runtime_resume_req(WMA_HANDLE handle);
+#endif
+
 #ifdef FEATURE_WLAN_D0WOW
 int wma_get_client_count(WMA_HANDLE handle);
 #endif
@@ -143,4 +153,29 @@ void *wma_get_beacon_buffer_by_vdev_id(u_int8_t vdev_id,
 int process_wma_set_command(int sessid, int paramid,
                                    int sval, int vpdev);
 tANI_U8 wma_getFwWlanFeatCaps(tANI_U8 featEnumValue);
+VOS_STATUS wma_set_cts2self_for_p2p_go(void *wda_handle,
+		u_int32_t cts2self_for_p2p_go);
+VOS_STATUS wma_set_mib_stats_enable(void *wda_handle, u_int32_t enable);
+
+#ifdef FEATURE_GREEN_AP
+void wma_setup_egap_support(struct hdd_tgt_cfg *tgt_cfg, WMA_HANDLE handle);
+void wma_register_egap_event_handle(WMA_HANDLE handle);
+VOS_STATUS wma_send_egap_conf_params(WMA_HANDLE handle,
+				     struct egap_conf_params *egap_params);
+#else
+static inline void wma_setup_egap_support(struct hdd_tgt_cfg *tgt_cfg,
+					  WMA_HANDLE handle) {}
+static inline void wma_register_egap_event_handle(WMA_HANDLE handle) {}
+static inline VOS_STATUS wma_send_egap_conf_params(WMA_HANDLE handle,
+				     struct egap_conf_params *egap_params)
+{
+	return VOS_STATUS_E_NOSUPPORT;
+}
+#endif
+
+extern int wma_scpc_event_handler(void *handle, u_int8_t *event, u_int32_t len);
+
+VOS_STATUS wma_set_tx_power_scale(uint8_t vdev_id, int value);
+VOS_STATUS wma_set_tx_power_scale_decr_db(uint8_t vdev_id, int value);
+
 #endif

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2014 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2013-2016 The Linux Foundation. All rights reserved.
  *
  * Previously licensed under the ISC license by Qualcomm Atheros, Inc.
  *
@@ -66,6 +66,8 @@ struct ol_ath_htc_stats {
     int     htc_send_q_empty_count;
 };
 
+/* To resume HTT Tx queue during runtime resume */
+typedef void (*HTC_EP_RESUME_TX_QUEUE)(void *);
 /* per service connection send completion */
 typedef void   (*HTC_EP_SEND_PKT_COMPLETE)(void *,HTC_PACKET *);
 /* per service connection callback when a plurality of packets have been sent
@@ -141,6 +143,7 @@ typedef struct _HTC_EP_CALLBACKS {
     HTC_EP_RECV_REFILL       EpRecvRefill;  /* OPTIONAL receive re-fill callback for connected endpoint */
     HTC_EP_SEND_QUEUE_FULL   EpSendFull;    /* OPTIONAL send full callback */
     HTC_EP_RECV_ALLOC        EpRecvAlloc;   /* OPTIONAL recv allocation callback */
+    HTC_EP_RESUME_TX_QUEUE   EpResumeTxQueue; /*OPTIONAL for WMI. Needed for HTT Service */
     HTC_EP_RECV_ALLOC        EpRecvAllocThresh;  /* OPTIONAL recv allocation callback based on a threshold */
     HTC_EP_SEND_PKT_COMP_MULTIPLE EpTxCompleteMultiple; /* OPTIONAL completion handler for multiple complete
                                                              indications (EpTxComplete must be NULL) */
@@ -274,6 +277,9 @@ typedef struct _HTC_ENDPOINT_STATS {
     A_UINT32  RxBundleIndFromHdr;     /* count of the number of bundle indications from the HTC header */
     A_UINT32  RxAllocThreshHit;       /* count of the number of times the recv allocation threshhold was hit */
     A_UINT32  RxAllocThreshBytes;     /* total number of bytes */
+
+    A_UINT32  HIFDSRCount;            /* total number of interrupts */
+
 } HTC_ENDPOINT_STATS;
 
 /* ------ Function Prototypes ------ */
@@ -617,6 +623,18 @@ A_STATUS    HTCAddReceivePktMultiple(HTC_HANDLE HTCHandle, HTC_PACKET_QUEUE *pPk
 A_BOOL      HTCIsEndpointActive(HTC_HANDLE      HTCHandle,
                                 HTC_ENDPOINT_ID Endpoint);
 
+/*+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+  @desc: Set up nodrop pkt flag for mboxping nodrop pkt
+  @function name: HTCIsEndpointActive
+  @input:  HTCHandle - HTC handle
+           isNodropPkt - indicates whether it is nodrop pkt
+  @output:
+  @return:
+  @notes:
+  @example:
+  @see also:
++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++*/
+void        HTCSetNodropPkt(HTC_HANDLE HTCHandle, A_BOOL isNodropPkt);
 
 /*+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
   @desc: Get the number of recv buffers currently queued into an HTC endpoint
@@ -685,4 +703,17 @@ void HTCIpaGetCEResource(HTC_HANDLE htc_handle,
                       a_uint32_t *ce_sr_ring_size,
                       a_uint32_t *ce_reg_paddr);
 #endif/* IPA_UC_OFFLOAD */
+
+
+void HTCEndpointDumpCreditStats(HTC_HANDLE HTCHandle, HTC_ENDPOINT_ID Endpoint);
+void HTCDumpBundleStats(HTC_HANDLE HTCHandle);
+void HTCClearBundleStats(HTC_HANDLE HTCHandle);
+
+#ifdef FEATURE_RUNTIME_PM
+int htc_pm_runtime_get(HTC_HANDLE htc_handle);
+int htc_pm_runtime_put(HTC_HANDLE htc_handle);
+#else
+static inline int htc_pm_runtime_get(HTC_HANDLE htc_handle) { return 0; }
+static inline int htc_pm_runtime_put(HTC_HANDLE htc_handle) { return 0; }
+#endif
 #endif /* _HTC_API_H_ */

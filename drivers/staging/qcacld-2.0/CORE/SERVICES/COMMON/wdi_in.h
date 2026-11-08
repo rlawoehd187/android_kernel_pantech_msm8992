@@ -105,8 +105,8 @@ void wdi_in_enable_host_ratectrl(ol_txrx_pdev_handle pdev, u_int32_t enable);
 /**
  * @brief modes that a virtual device can operate as
  * @details
- *  A virtual device can operate as an AP, an IBSS, or a STA (client).
- *  or in monitor mode
+ *  A virtual device can operate as an AP, an IBSS, a STA
+ *  (client), in monitor mode or OCB mode
  */
 enum wlan_op_mode {
    wlan_op_mode_unknown,
@@ -114,6 +114,7 @@ enum wlan_op_mode {
    wlan_op_mode_ibss,
    wlan_op_mode_sta,
    wlan_op_mode_monitor,
+   wlan_op_mode_ocb,
 };
 
 /**
@@ -350,36 +351,38 @@ wdi_in_vdev_unpause(ol_txrx_vdev_handle data_vdev, u_int32_t reason);
 /**
  * @brief Suspend all tx data for the specified physical device.
  * @details
- *  This function applies only to HL systems - in LL systems, tx flow control
- *  is handled entirely within the target FW.
+ *  This function applies to HL systems -
+ *  in LL systems, applies when txrx_vdev_pause_all is enabled.
  *  In some systems it is necessary to be able to temporarily
  *  suspend all WLAN traffic, e.g. to allow another device such as bluetooth
  *  to temporarily have exclusive access to shared RF chain resources.
  *  This function suspends tx traffic within the specified physical device.
  *
  * @param data_pdev - the physical device being paused
+ * @param reason - pause reason
  */
-#if defined(CONFIG_HL_SUPPORT)
+#if defined(CONFIG_HL_SUPPORT) || defined(QCA_SUPPORT_TXRX_VDEV_PAUSE_LL)
 void
-wdi_in_pdev_pause(ol_txrx_pdev_handle data_pdev);
+wdi_in_pdev_pause(ol_txrx_pdev_handle data_pdev, u_int32_t reason);
 #else
-#define wdi_in_pdev_pause(data_pdev) /* no-op */
-#endif /* CONFIG_HL_SUPPORT */
+#define wdi_in_pdev_pause(data_pdev, reason) /* no-op */
+#endif
 
 /**
  * @brief Resume tx for the specified physical device.
  * @details
- *  This function applies only to HL systems - in LL systems, tx flow control
- *  is handled entirely within the target FW.
+ *  This function applies to HL systems -
+ *  in LL systems, applies when txrx_vdev_pause_all is enabled.
  *
  * @param data_pdev - the physical device being unpaused
+ * @param reason - pause reason
  */
-#if defined(CONFIG_HL_SUPPORT)
+#if defined(CONFIG_HL_SUPPORT) || defined(QCA_SUPPORT_TXRX_VDEV_PAUSE_LL)
 void
-wdi_in_pdev_unpause(ol_txrx_pdev_handle data_pdev);
+wdi_in_pdev_unpause(ol_txrx_pdev_handle data_pdev, u_int32_t reason);
 #else
-#define wdi_in_pdev_unpause(data_pdev) /* no-op */
-#endif /* CONFIG_HL_SUPPORT */
+#define wdi_in_pdev_unpause(data_pdev, reason) /* no-op */
+#endif
 
 /**
  * @brief Synchronize the data-path tx with a control-path target download
@@ -556,6 +559,23 @@ wdi_in_mgmt_send(
     u_int8_t type,
     u_int8_t use_6mbps,
     u_int16_t chanfreq);
+
+/**
+ * wdi_in_display_stats - display txrx stats
+ * @pdev: txrx pdev context
+ * @value: value
+ */
+void
+wdi_in_display_stats(struct ol_txrx_pdev_t *pdev, uint16_t value);
+
+
+/**
+ * wdi_in_clear_stats - clear txrx stats
+ * @pdev: txrx pdev context
+ * @value: value
+ */
+void
+wdi_in_clear_stats(struct ol_txrx_pdev_t *pdev, uint16_t value);
 
 /**
  * @brief Setup the monitor mode vap (vdev) for this pdev
@@ -1150,9 +1170,8 @@ ol_rx_pn_trace_display(ol_txrx_pdev_handle pdev, int just_once);
 
 /*--- tx queue log debug feature ---*/
 /* uncomment this to enable the tx queue log feature */
-//#define ENABLE_TX_QUEUE_LOG 1
 
-#if defined(ENABLE_TX_QUEUE_LOG) && defined(CONFIG_HL_SUPPORT)
+#if defined(DEBUG_HL_LOGGING) && defined(CONFIG_HL_SUPPORT)
 
 void
 ol_tx_queue_log_display(ol_txrx_pdev_handle pdev);
@@ -1161,7 +1180,7 @@ ol_tx_queue_log_display(ol_txrx_pdev_handle pdev);
 
 #define ol_tx_queue_log_display(pdev)
 
-#endif /* defined(ENABLE_TX_QUEUE_LOG) && defined(CONFIG_HL_SUPPORT) */
+#endif /* defined(DEBUG_HL_LOGGING) && defined(CONFIG_HL_SUPPORT) */
 
 #endif /* ATH_PERF_PWR_OFFLOAD  */ /*----------------------------------------*/
 
@@ -1182,6 +1201,8 @@ ol_tx_queue_log_display(ol_txrx_pdev_handle pdev);
 #define wdi_in_tx_release ol_txrx_tx_release
 #define wdi_in_vdev_pause ol_txrx_vdev_pause
 #define wdi_in_vdev_unpause ol_txrx_vdev_unpause
+#define wdi_in_pdev_pause_other_vdev ol_txrx_pdev_pause_other_vdev
+#define wdi_in_pdev_unpause_other_vdev ol_txrx_pdev_unpause_other_vdev
 #define wdi_in_pdev_pause ol_txrx_pdev_pause
 #define wdi_in_pdev_unpause ol_txrx_pdev_unpause
 #define wdi_in_tx_sync ol_txrx_tx_sync
@@ -1191,6 +1212,8 @@ ol_tx_queue_log_display(ol_txrx_pdev_handle pdev);
 #define wdi_in_data_tx_cb_set ol_txrx_data_tx_cb_set
 #define wdi_in_mgmt_tx_cb_set ol_txrx_mgmt_tx_cb_set
 #define wdi_in_mgmt_send ol_txrx_mgmt_send
+#define wdi_in_display_stats ol_txrx_display_stats
+#define wdi_in_clear_stats ol_txrx_clear_stats
 #define wdi_in_set_monitor_mode_vap ol_txrx_set_monitor_mode_vap
 #define wdi_in_set_curchan ol_txrx_set_curchan
 #define wdi_in_get_tx_pending ol_txrx_get_tx_pending

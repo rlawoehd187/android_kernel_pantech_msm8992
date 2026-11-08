@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2014 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2011-2016 The Linux Foundation. All rights reserved.
  *
  * Previously licensed under the ISC license by Qualcomm Atheros, Inc.
  *
@@ -77,6 +77,10 @@ typedef struct sCsrNeighborRoamCfgParams
     tANI_U8         nRoamBmissFinalBcnt;
     tANI_U8         nRoamBeaconRssiWeight;
     tANI_U8         delay_before_vdev_stop;
+    uint32_t        hi_rssi_scan_max_count;
+    uint32_t        hi_rssi_scan_rssi_delta;
+    uint32_t        hi_rssi_scan_delay;
+    int32_t        hi_rssi_scan_rssi_ub;
 } tCsrNeighborRoamCfgParams, *tpCsrNeighborRoamCfgParams;
 
 #define CSR_NEIGHBOR_ROAM_INVALID_CHANNEL_INDEX    255
@@ -174,7 +178,7 @@ typedef struct sCsrNeighborRoamControlInfo
     tANI_U8                     currentOpportunisticThresholdDiff;
     tANI_U8                     currentRoamRescanRssiDiff;
     tANI_BOOLEAN                scanRspPending;
-    tANI_TIMESTAMP              scanRequestTimeStamp;
+    v_TIME_t                    scanRequestTimeStamp;
     tDblLinkList                roamableAPList;    // List of current FT candidates
     tCsrRoamProfile             csrNeighborRoamProfile;
 #ifdef WLAN_FEATURE_VOWIFI_11R
@@ -207,6 +211,7 @@ typedef struct sCsrNeighborRoamControlInfo
     tANI_U8                     currentRoamBmissFirstBcnt;
     tANI_U8                     currentRoamBmissFinalBcnt;
     tANI_U8                     currentRoamBeaconRssiWeight;
+    tANI_U8                     lastSentCmd;
 } tCsrNeighborRoamControlInfo, *tpCsrNeighborRoamControlInfo;
 
 /* All the necessary Function declarations are here */
@@ -226,7 +231,7 @@ VOS_STATUS csrNeighborRoamTransitionToPreauthDone(tpAniSirGlobal pMac);
 eHalStatus csrNeighborRoamPrepareScanProfileFilter(tpAniSirGlobal pMac,
                                               tCsrScanResultFilter *pScanFilter,
                                               tANI_U8 sessionId);
-void csrNeighborRoamGetHandoffAPInfo(tpAniSirGlobal pMac,
+bool csrNeighborRoamGetHandoffAPInfo(tpAniSirGlobal pMac,
                                      tpCsrNeighborRoamBSSInfo pHandoffNode,
                                      tANI_U8 sessionId);
 eHalStatus csrNeighborRoamPreauthRspHandler(tpAniSirGlobal pMac,
@@ -292,6 +297,7 @@ VOS_STATUS csrNeighborRoamMergeChannelLists(tpAniSirGlobal pMac,
                                     tANI_U8  *pOutputChannelList,
                                     tANI_U8  outputNumOfChannels,
                                     tANI_U8  *pMergedOutputNumOfChannels);
+void csr_roam_reset_roam_params(tpAniSirGlobal mac_ptr);
 #ifdef WLAN_FEATURE_ROAM_SCAN_OFFLOAD
 #define ROAM_SCAN_OFFLOAD_START                     1
 #define ROAM_SCAN_OFFLOAD_STOP                      2
@@ -323,6 +329,17 @@ VOS_STATUS csrNeighborRoamMergeChannelLists(tpAniSirGlobal pMac,
 #define REASON_ROAM_BEACON_RSSI_WEIGHT_CHANGED      22
 #define REASON_ROAM_DFS_SCAN_MODE_CHANGED           23
 #define REASON_ROAM_ABORT_ROAM_SCAN                 24
+#define REASON_ROAM_EXT_SCAN_PARAMS_CHANGED         25
+#define REASON_ROAM_SET_SSID_ALLOWED                26
+#define REASON_ROAM_SET_FAVORED_BSSID               27
+#define REASON_ROAM_GOOD_RSSI_CHANGED               28
+#define REASON_ROAM_SET_BLACKLIST_BSSID             29
+#define REASON_ROAM_SCAN_HI_RSSI_MAXCOUNT_CHANGED   30
+#define REASON_ROAM_SCAN_HI_RSSI_DELTA_CHANGED      31
+#define REASON_ROAM_SCAN_HI_RSSI_DELAY_CHANGED      32
+#define REASON_ROAM_SCAN_HI_RSSI_UB_CHANGED         33
+#define REASON_ROAM_SCAN_STA_ROAM_POLICY_CHANGED    34
+
 eHalStatus csrRoamOffloadScan(tpAniSirGlobal pMac, tANI_U8 sessionId,
                               tANI_U8 command, tANI_U8 reason);
 eHalStatus csrNeighborRoamCandidateFoundIndHdlr(tpAniSirGlobal pMac,
@@ -340,7 +357,7 @@ eHalStatus csrNeighborRoamStartLfrScan(tpAniSirGlobal pMac, tANI_U8 sessionId);
 VOS_STATUS csrSetCCKMIe(tpAniSirGlobal pMac, const tANI_U8 sessionId,
                             const tANI_U8 *pCckmIe,
                             const tANI_U8 ccKmIeLen);
-VOS_STATUS csrRoamReadTSF(tpAniSirGlobal pMac, tANI_U8 *pTimestamp,
+eHalStatus csrRoamReadTSF(tpAniSirGlobal pMac, tANI_U8 *pTimestamp,
                           const tANI_U8 sessionId);
 #endif /*FEATURE_WLAN_ESE && FEATURE_WLAN_ESE_UPLOAD */
 #ifdef WLAN_FEATURE_ROAM_OFFLOAD

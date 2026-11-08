@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2014 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2011-2016 The Linux Foundation. All rights reserved.
  *
  * Previously licensed under the ISC license by Qualcomm Atheros, Inc.
  *
@@ -56,6 +56,8 @@
 #endif
 #include "limSession.h"
 #define LIM_GET_NOISE_MAX_TRY 5
+
+#include "wma.h"
 /**
  * limExtractApCapability()
  *
@@ -105,12 +107,12 @@ limExtractApCapability(tpAniSirGlobal pMac, tANI_U8 *pIE, tANI_U16 ieLen,
     sirDumpBuf( pMac, SIR_LIM_MODULE_ID, LOG3, pIE, ieLen );)
     if (sirParseBeaconIE(pMac, pBeaconStruct, pIE, (tANI_U32)ieLen) == eSIR_SUCCESS)
     {
-        if (pBeaconStruct->wmeInfoPresent || pBeaconStruct->wmeEdcaPresent)
+        if (pBeaconStruct->wmeInfoPresent || pBeaconStruct->wmeEdcaPresent
+            || pBeaconStruct->HTCaps.present)
             LIM_BSS_CAPS_SET(WME, *qosCap);
         if (LIM_BSS_CAPS_GET(WME, *qosCap) && pBeaconStruct->wsmCapablePresent)
             LIM_BSS_CAPS_SET(WSM, *qosCap);
-        if (pBeaconStruct->propIEinfo.aniIndicator &&
-            pBeaconStruct->propIEinfo.capabilityPresent)
+        if (pBeaconStruct->propIEinfo.capabilityPresent)
             *propCap = pBeaconStruct->propIEinfo.capability;
         if (pBeaconStruct->HTCaps.present)
             pMac->lim.htCapabilityPresentInBeacon = 1;
@@ -118,19 +120,40 @@ limExtractApCapability(tpAniSirGlobal pMac, tANI_U8 *pIE, tANI_U16 ieLen,
             pMac->lim.htCapabilityPresentInBeacon = 0;
 
 #ifdef WLAN_FEATURE_11AC
-        VOS_TRACE(VOS_MODULE_ID_PE, VOS_TRACE_LEVEL_INFO_MED,
-            "***beacon.VHTCaps.present*****=%d",pBeaconStruct->VHTCaps.present);
-        VOS_TRACE(VOS_MODULE_ID_PE, VOS_TRACE_LEVEL_INFO_MED,
-           "***beacon.SU Beamformer Capable*****=%d",pBeaconStruct->VHTCaps.suBeamFormerCap);
+        limLog(pMac, LOG1,
+            FL("Beacon : VHTCaps.present: %d SU Beamformer: %d, IS_BSS_VHT_CAPABLE: %d"),
+            pBeaconStruct->VHTCaps.present,
+            pBeaconStruct->VHTCaps.suBeamFormerCap,
+            IS_BSS_VHT_CAPABLE(pBeaconStruct->VHTCaps));
 
-        if ( pBeaconStruct->VHTCaps.present && pBeaconStruct->VHTOperation.present)
+        if (IS_BSS_VHT_CAPABLE(pBeaconStruct->VHTCaps) && pBeaconStruct->VHTOperation.present)
         {
+            /* If VHT is supported min 80 MHz support is must */
+            uint32_t fw_vht_ch_wd = wma_get_vht_ch_width();
+            uint32_t vht_ch_wd;
+
             psessionEntry->vhtCapabilityPresentInBeacon = 1;
-            psessionEntry->apCenterChan = pBeaconStruct->VHTOperation.chanCenterFreqSeg1;
-            psessionEntry->apChanWidth = pBeaconStruct->VHTOperation.chanWidth;
+            vht_ch_wd = VOS_MIN(fw_vht_ch_wd,
+                            pBeaconStruct->VHTOperation.chanWidth);
+            /*
+             * First block covers 2 cases:
+             * 1) AP and STA both have same vht capab
+             * 2) AP is 160 (80+80), we are 160 only
+             */
+            if (vht_ch_wd == pBeaconStruct->VHTOperation.chanWidth ||
+                vht_ch_wd >= WNI_CFG_VHT_CHANNEL_WIDTH_160MHZ ) {
+                psessionEntry->apCenterChan =
+                    pBeaconStruct->VHTOperation.chanCenterFreqSeg1;
+            } else {
+                /* This is the case when AP was 160 but we were 80 only */
+                psessionEntry->apCenterChan =
+                    lim_get_80Mhz_center_channel(pBeaconStruct->channelNumber);
+            }
+            psessionEntry->apChanWidth = vht_ch_wd;
+            psessionEntry->vhtTxChannelWidthSet = vht_ch_wd;
 
             if (pBeaconStruct->Vendor1IEPresent &&
-                pBeaconStruct->Vendor2IEPresent &&
+                pBeaconStruct->vendor2_ie.present &&
                 pBeaconStruct->Vendor3IEPresent)
             {
                 if (((pBeaconStruct->VHTCaps.txMCSMap & VHT_MCS_3x3_MASK) ==
@@ -170,23 +193,32 @@ limExtractApCapability(tpAniSirGlobal pMac, tANI_U8 *pIE, tANI_U16 ieLen,
         // Extract the UAPSD flag from WMM Parameter element
         if (pBeaconStruct->wmeEdcaPresent)
             *uapsd = pBeaconStruct->edcaParams.qosInfo.uapsd;
-#if defined FEATURE_WLAN_ESE
-        /* If there is Power Constraint Element specifically,
-         * adapt to it. Hence there is else condition check
-         * for this if statement.
-         */
-        if ( pBeaconStruct->eseTxPwr.present)
-        {
-            *localConstraint = pBeaconStruct->eseTxPwr.power_limit;
-        }
-#endif
-        if (pBeaconStruct->powerConstraintPresent)
-        {
+
+        if (pMac->roam.configParam.allow_tpc_from_ap) {
+
+            if (pBeaconStruct->powerConstraintPresent) {
 #if defined WLAN_FEATURE_VOWIFI
-           *localConstraint -= pBeaconStruct->localPowerConstraint.localPowerConstraints;
+                *localConstraint -=
+                  pBeaconStruct->localPowerConstraint.localPowerConstraints;
 #else
-           localPowerConstraints = (tANI_U32)pBeaconStruct->localPowerConstraint.localPowerConstraints;
+                localPowerConstraints =
+                       (tANI_U32)pBeaconStruct->localPowerConstraint.
+                                                     localPowerConstraints;
 #endif
+            }
+            else {
+#if defined FEATURE_WLAN_ESE
+            /* If there is Power Constraint Element specifically,
+             * adapt to it. Hence there is else condition check
+             * for this if statement.
+             */
+            if ( pBeaconStruct->eseTxPwr.present)
+                 *localConstraint = pBeaconStruct->eseTxPwr.power_limit;
+
+                 psessionEntry->is_ese_version_ie_present =
+                              pBeaconStruct->is_ese_ver_ie_present;
+#endif
+            }
         }
 #if !defined WLAN_FEATURE_VOWIFI
         if (cfgSetInt(pMac, WNI_CFG_LOCAL_POWER_CONSTRAINT, localPowerConstraints) != eSIR_SUCCESS)
@@ -194,7 +226,14 @@ limExtractApCapability(tpAniSirGlobal pMac, tANI_U8 *pIE, tANI_U16 ieLen,
             limLog(pMac, LOGP, FL("Could not update local power constraint to cfg."));
         }
 #endif
+        psessionEntry->countryInfoPresent = FALSE;
+        /* Initializing before first use */
+        if (pBeaconStruct->countryInfoPresent)
+           psessionEntry->countryInfoPresent = TRUE;
     }
+    /* Check if Extended caps are present in probe resp or not */
+    if (pBeaconStruct->ExtCap.present)
+        psessionEntry->is_ext_caps_present = true;
     vos_mem_free(pBeaconStruct);
     return;
 } /****** end limExtractApCapability() ******/
@@ -244,10 +283,7 @@ ePhyChanBondState  limGetHTCBState(ePhyChanBondState aniCBMode)
  * limGetStaPeerType
  *
  *FUNCTION:
- * Based on a combination of the following -
- * 1) tDphHashNode.aniPeer
- * 2) tDphHashNode.propCapability
- * this API determines if a given STA is an ANI peer or not
+ * This API returns STA peer type
  *
  *LOGIC:
  *
@@ -264,19 +300,9 @@ tStaRateMode limGetStaPeerType( tpAniSirGlobal pMac,
     tpDphHashNode pStaDs,
     tpPESession   psessionEntry)
 {
-tStaRateMode staPeerType = eSTA_11b;
-  // Determine the peer-STA type
-  if( pStaDs->aniPeer )
-  {
-    if(PROP_CAPABILITY_GET( TAURUS, pStaDs->propCapability ))
-        staPeerType = eSTA_TAURUS;
-    else if( PROP_CAPABILITY_GET( TITAN, pStaDs->propCapability ))
-        staPeerType = eSTA_TITAN;
-    else
-        staPeerType = eSTA_POLARIS;
-  }
+  tStaRateMode staPeerType = eSTA_11b;
 #ifdef WLAN_FEATURE_11AC
-  else if(pStaDs->mlmStaContext.vhtCapability)
+  if(pStaDs->mlmStaContext.vhtCapability)
       staPeerType = eSTA_11ac;
 #endif
   else if(pStaDs->mlmStaContext.htCapability)
