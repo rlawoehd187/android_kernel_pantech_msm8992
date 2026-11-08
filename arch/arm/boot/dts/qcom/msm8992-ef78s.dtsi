@@ -620,3 +620,9 @@
 	/* the state of charge comes from the MAX17058 like on stock */
 	qcom,ext-soc-psy-name = "max17058";
 };
+
+&soc {
+	qcom,cnss {
+		wlan-bootstrap-gpio = <&msm_gpio 112 0>;
+	};
+};
