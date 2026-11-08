@@ -259,6 +259,83 @@ static const struct v4l2_subdev_internal_ops msm_eeprom_internal_ops = {
 	.open = msm_eeprom_open,
 	.close = msm_eeprom_close,
 };
+/*
+ * The Rumba S/A actuator module of the IMX214 camera does not map its
+ * OTP memory on the bus: it is fetched through a command interface
+ * (size at 0x0f, offset at 0x10, read command 0x04 at 0x0e, then the
+ * data at 0x100 once 0x0e reports 0x14). The offset must be 4-byte
+ * aligned and a single command transfers at most RUMBA_READ_MAX bytes.
+ */
+#define RUMBA_MEM_BASE		0x7400
+#define RUMBA_MEM_SIZE		0x800
+#define RUMBA_READ_MAX		64
+#define RUMBA_READ_DONE		0x14
+
+static int rumba_cmd_read(struct msm_eeprom_ctrl_t *e_ctrl, uint8_t *buf,
+			  uint32_t size, uint32_t addr)
+{
+	struct msm_camera_i2c_client *client = &e_ctrl->i2c_client;
+	uint8_t offset[2];
+	uint16_t status = 0;
+	int rc;
+
+	if (addr < RUMBA_MEM_BASE ||
+	    addr + size > RUMBA_MEM_BASE + RUMBA_MEM_SIZE) {
+		pr_err("%s: 0x%x+%u out of range\n", __func__, addr, size);
+		return -EINVAL;
+	}
+	addr -= RUMBA_MEM_BASE;
+	offset[0] = addr & 0xff;
+	offset[1] = addr >> 8;
+
+	client->addr_type = MSM_CAMERA_I2C_WORD_ADDR;
+	rc = client->i2c_func_tbl->i2c_write(client, 0x0f, size,
+					     MSM_CAMERA_I2C_BYTE_DATA);
+	if (!rc)
+		rc = client->i2c_func_tbl->i2c_write_seq(client, 0x10,
+							 offset, 2);
+	if (!rc)
+		rc = client->i2c_func_tbl->i2c_write(client, 0x0e, 0x04,
+						     MSM_CAMERA_I2C_BYTE_DATA);
+	if (!rc)
+		rc = client->i2c_func_tbl->i2c_read(client, 0x0e, &status,
+						    MSM_CAMERA_I2C_BYTE_DATA);
+	if (rc < 0) {
+		pr_err("%s: command failed: %d\n", __func__, rc);
+		return rc;
+	}
+	if (status != RUMBA_READ_DONE) {
+		pr_err("%s: bad status 0x%x\n", __func__, status);
+		return -EIO;
+	}
+
+	return client->i2c_func_tbl->i2c_read_seq(client, 0x100, buf, size);
+}
+
+/* @buf must have (@addr & 3) bytes of headroom, which are preserved */
+static int rumba_read_mem(struct msm_eeprom_ctrl_t *e_ctrl, uint8_t *buf,
+			  uint32_t size, uint32_t addr)
+{
+	uint8_t save[3];
+	uint32_t chunk, mis;
+	int rc;
+
+	while (size) {
+		chunk = min_t(uint32_t, size, RUMBA_READ_MAX);
+		mis = addr & 3;
+		memcpy(save, buf - mis, mis);
+		rc = rumba_cmd_read(e_ctrl, buf - mis, chunk + mis,
+				    addr - mis);
+		memcpy(buf - mis, save, mis);
+		if (rc < 0)
+			return rc;
+		size -= chunk;
+		buf += chunk;
+		addr += chunk;
+	}
+	return 0;
+}
+
 /**
   * read_eeprom_memory() - read map data into buffer
   * @e_ctrl:	eeprom control struct
@@ -326,7 +403,19 @@ static int read_eeprom_memory(struct msm_eeprom_ctrl_t *e_ctrl,
 			}
 		}
 
-		if (emap[j].mem.valid_size) {
+		if (emap[j].mem.valid_size && e_ctrl->rumba_cmd_read) {
+			if (memptr - block->mapdata < (emap[j].mem.addr & 3)) {
+				pr_err("%s: unaligned first block\n", __func__);
+				return -EINVAL;
+			}
+			rc = rumba_read_mem(e_ctrl, memptr,
+				emap[j].mem.valid_size, emap[j].mem.addr);
+			if (rc < 0) {
+				pr_err("%s: read failed\n", __func__);
+				return rc;
+			}
+			memptr += emap[j].mem.valid_size;
+		} else if (emap[j].mem.valid_size) {
 			e_ctrl->i2c_client.addr_type = emap[j].mem.addr_t;
 			rc = e_ctrl->i2c_client.i2c_func_tbl->i2c_read_seq(
 				&(e_ctrl->i2c_client), emap[j].mem.addr,
@@ -1116,6 +1205,9 @@ static int msm_eeprom_platform_probe(struct platform_device *pdev)
 		pr_err("%s failed %d\n", __func__, __LINE__);
 		goto board_free;
 	}
+
+	e_ctrl->rumba_cmd_read = of_property_read_bool(of_node,
+		"qcom,rumba-cmd-read");
 
 	rc = msm_eeprom_cmm_dts(e_ctrl->eboard_info, of_node);
 	if (rc < 0)
