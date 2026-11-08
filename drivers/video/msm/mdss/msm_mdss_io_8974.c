@@ -964,9 +964,13 @@ static int mdss_dsi_ulps_config(struct mdss_dsi_ctrl_pdata *ctrl,
 	pinfo = &pdata->panel_info;
 	mipi = &pinfo->mipi;
 
+	/*
+	 * Once the panel is blanked the controller and phy are already off,
+	 * so ULPS can only be requested when ULPS during suspend is enabled.
+	 */
 	if (!mdss_dsi_ulps_feature_enabled(pdata) &&
-		!pinfo->ulps_suspend_enabled &&
-		(pinfo->blank_state != MDSS_PANEL_BLANK_BLANK)) {
+		!(pinfo->ulps_suspend_enabled &&
+		  (pinfo->blank_state == MDSS_PANEL_BLANK_BLANK))) {
 		pr_debug("%s: ULPS feature not supported. enable=%d\n",
 			__func__, enable);
 		return -ENOTSUPP;
