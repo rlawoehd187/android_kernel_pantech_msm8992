@@ -76,6 +76,9 @@ static int32_t msm_actuator_piezo_set_default_focus(
 	return rc;
 }
 
+/* register of the Rumba S/A that is always written as a word */
+#define RUMBA_SA_WORD_REG	0x02c0
+
 static void msm_actuator_parse_i2c_params(struct msm_actuator_ctrl_t *a_ctrl,
 	int16_t next_lens_position, uint32_t hw_params, uint16_t delay)
 {
@@ -98,7 +101,13 @@ static void msm_actuator_parse_i2c_params(struct msm_actuator_ctrl_t *a_ctrl,
 				((hw_dword & write_arr[i].hw_mask) >>
 				write_arr[i].hw_shift);
 
-			if (write_arr[i].reg_addr != 0xFFFF) {
+			if (write_arr[i].reg_addr != 0xFFFF &&
+			    a_ctrl->rumba_sa) {
+				/* the DAC takes a little endian word */
+				i2c_byte1 = write_arr[i].reg_addr;
+				i2c_byte2 = swab16(value);
+				a_ctrl->i2c_data_type = MSM_ACTUATOR_WORD_DATA;
+			} else if (write_arr[i].reg_addr != 0xFFFF) {
 				i2c_byte1 = write_arr[i].reg_addr;
 				i2c_byte2 = value;
 				if (size != (i+1)) {
@@ -371,6 +380,9 @@ static int32_t msm_actuator_init_focus(struct msm_actuator_ctrl_t *a_ctrl,
 				&a_ctrl->i2c_client,
 				settings[i].reg_addr,
 				settings[i].reg_data,
+				(a_ctrl->rumba_sa &&
+				 settings[i].reg_addr == RUMBA_SA_WORD_REG) ?
+				MSM_CAMERA_I2C_WORD_DATA :
 				settings[i].data_type);
 			break;
 		case MSM_ACT_POLL:
@@ -579,7 +591,9 @@ static int32_t msm_actuator_move_focus(
 		step_boundary =
 			a_ctrl->region_params[a_ctrl->curr_region_index].
 			step_bound[dir];
-		if ((dest_step_pos * sign_dir) <=
+		/* the Rumba S/A moves the lens in one go */
+		if (a_ctrl->rumba_sa ||
+			(dest_step_pos * sign_dir) <=
 			(step_boundary * sign_dir)) {
 
 			target_step_pos = dest_step_pos;
@@ -1692,6 +1706,9 @@ static int32_t msm_actuator_platform_probe(struct platform_device *pdev)
 		pr_err("failed rc %d\n", rc);
 		return rc;
 	}
+
+	msm_actuator_t->rumba_sa = of_property_read_bool(pdev->dev.of_node,
+		"qcom,rumba-sa");
 
 	rc = of_property_read_u32((&pdev->dev)->of_node, "qcom,cci-master",
 		&msm_actuator_t->cci_master);

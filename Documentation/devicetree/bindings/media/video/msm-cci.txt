@@ -198,6 +198,9 @@ Optional properties:
    required from the regulators mentioned in the qcom,cam-vreg-name property
    (in the same order).
 - cam_vaf-supply : should contain regulator from which AF voltage is supplied
+- qcom,rumba-sa : boolean, the actuator is a Rumba S/A module: the lens is
+    moved straight to the target position, the DAC code is written as a
+    little endian word and register 0x02c0 is always written as a word.
 
 * Qualcomm MSM OIS
 
